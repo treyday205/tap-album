@@ -33,6 +33,7 @@ const EditorPage: React.FC = () => {
   const [downloadSuccessId, setDownloadSuccessId] = useState<string | null>(null);
   const [uploadingTrackId, setUploadingTrackId] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [assetUrls, setAssetUrls] = useState<Record<string, string>>({});
   
   const [project, setProject] = useState<Project | null>(null);
@@ -155,6 +156,7 @@ const EditorPage: React.FC = () => {
       }
       return;
     }
+    setUploadError(null);
 
     const isAudioUpload = type === 'TRACK_AUDIO';
     const autoTitle = (name: string) => name.replace(/\.[^/.]+$/, '').replace(/[_-]+/g, ' ').trim() || 'New Track';
@@ -233,7 +235,9 @@ const EditorPage: React.FC = () => {
           await uploadAudioToTrack(item.file, item.trackId);
         }
       } catch (err: any) {
-        alert(err?.message || 'Upload failed.');
+        const message = err?.message || 'Upload failed.';
+        setUploadError(message);
+        alert(message);
       } finally {
         setUploadingTrackId(null);
         setUploadProgress(prev => {
@@ -282,7 +286,9 @@ const EditorPage: React.FC = () => {
           ensureSignedAssets([assetRef]);
         }
       } catch (err: any) {
-        alert(err?.message || 'Upload failed.');
+        const message = err?.message || 'Upload failed.';
+        setUploadError(message);
+        alert(message);
       } finally {
         e.target.value = '';
       }
@@ -306,7 +312,9 @@ const EditorPage: React.FC = () => {
         ensureSignedAssets([assetRef]);
       }
     } catch (err: any) {
-      alert(err?.message || 'Upload failed.');
+      const message = err?.message || 'Upload failed.';
+      setUploadError(message);
+      alert(message);
     } finally {
       setUploadTargetTrackId(null);
       e.target.value = '';
@@ -555,6 +563,11 @@ const EditorPage: React.FC = () => {
                       </div>
                     </div>
                     <div className="flex-grow space-y-6">
+                      {uploadError && (
+                        <div className="bg-red-500/10 border border-red-500/30 text-red-300 text-[10px] font-black uppercase tracking-widest rounded-2xl px-4 py-3">
+                          Upload error: {uploadError}
+                        </div>
+                      )}
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                         <div>
                           <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Project Title</label>

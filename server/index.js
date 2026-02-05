@@ -196,6 +196,10 @@ const s3Client =
       })
     : null;
 
+if (!s3Client) {
+  console.warn('S3/R2 storage is not configured. Uploads will use local storage.');
+}
+
 if (!DATABASE_URL) {
   console.error('Missing DATABASE_URL. Set it in your environment.');
   process.exit(1);

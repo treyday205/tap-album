@@ -176,10 +176,11 @@ export const Api = {
                 return {};
               }
             })();
-            rejectUpload(new Error(data?.message || 'Upload failed.'));
+            const message = data?.message || `Upload failed (status ${xhr.status})`;
+            rejectUpload(new Error(message));
           };
 
-          xhr.onerror = () => rejectUpload(new Error('Upload failed.'));
+          xhr.onerror = () => rejectUpload(new Error(`Upload failed (status ${xhr.status || 0})`));
           xhr.send(file);
         });
 
