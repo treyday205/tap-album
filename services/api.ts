@@ -115,9 +115,10 @@ export const Api = {
     }
   ): Promise<{ assetRef: string }> =>
     new Promise(async (resolve, reject) => {
-      try {
-        const contentType = file.type || 'application/octet-stream';
-        const presign = await request('/api/uploads/presign', {
+      const contentType = file.type || 'application/octet-stream';
+
+      const requestPresign = (preferLocal = false) =>
+        request('/api/uploads/presign', {
           method: 'POST',
           body: JSON.stringify({
             projectId,
@@ -125,59 +126,75 @@ export const Api = {
             assetKind: options.assetKind,
             contentType,
             fileName: file.name,
-            size: file.size
+            size: file.size,
+            preferLocal
           })
         });
 
-        const uploadUrl = String(presign?.uploadUrl || '');
-        const assetRef = String(presign?.assetRef || '');
-        const method = String(presign?.method || 'PUT').toUpperCase();
-        const headers = presign?.headers || {};
+      const uploadWithConfig = (presign: any) =>
+        new Promise<void>((resolveUpload, rejectUpload) => {
+          const uploadUrl = String(presign?.uploadUrl || '');
+          const assetRef = String(presign?.assetRef || '');
+          const method = String(presign?.method || 'PUT').toUpperCase();
+          const headers = presign?.headers || {};
 
-        if (!uploadUrl || !assetRef) {
-          throw new Error('Upload configuration missing.');
-        }
-
-        const resolvedUploadUrl = /^https?:\/\//i.test(uploadUrl)
-          ? uploadUrl
-          : `${API_BASE_URL}${uploadUrl}`;
-
-        const xhr = new XMLHttpRequest();
-        xhr.open(method, resolvedUploadUrl);
-        xhr.responseType = 'json';
-
-        if (options.onProgress) {
-          xhr.upload.onprogress = (event) => {
-            if (!event.lengthComputable) return;
-            const percent = Math.round((event.loaded / event.total) * 100);
-            options.onProgress?.(Math.min(100, Math.max(0, percent)));
-          };
-        }
-
-        Object.entries(headers).forEach(([key, value]) => {
-          if (value === undefined || value === null) return;
-          xhr.setRequestHeader(key, String(value));
-        });
-
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve({ assetRef });
+          if (!uploadUrl || !assetRef) {
+            rejectUpload(new Error('Upload configuration missing.'));
             return;
           }
-          const data = xhr.response || (() => {
-            try {
-              return JSON.parse(xhr.responseText || '{}');
-            } catch {
-              return {};
-            }
-          })();
-          reject(new Error(data?.message || 'Upload failed.'));
-        };
 
-        xhr.onerror = () => reject(new Error('Upload failed.'));
-        xhr.send(file);
+          const resolvedUploadUrl = /^https?:\/\//i.test(uploadUrl)
+            ? uploadUrl
+            : `${API_BASE_URL}${uploadUrl}`;
+
+          const xhr = new XMLHttpRequest();
+          xhr.open(method, resolvedUploadUrl);
+          xhr.responseType = 'json';
+
+          if (options.onProgress) {
+            xhr.upload.onprogress = (event) => {
+              if (!event.lengthComputable) return;
+              const percent = Math.round((event.loaded / event.total) * 100);
+              options.onProgress?.(Math.min(100, Math.max(0, percent)));
+            };
+          }
+
+          Object.entries(headers).forEach(([key, value]) => {
+            if (value === undefined || value === null) return;
+            xhr.setRequestHeader(key, String(value));
+          });
+
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolveUpload();
+              return;
+            }
+            const data = xhr.response || (() => {
+              try {
+                return JSON.parse(xhr.responseText || '{}');
+              } catch {
+                return {};
+              }
+            })();
+            rejectUpload(new Error(data?.message || 'Upload failed.'));
+          };
+
+          xhr.onerror = () => rejectUpload(new Error('Upload failed.'));
+          xhr.send(file);
+        });
+
+      try {
+        const presign = await requestPresign(false);
+        await uploadWithConfig(presign);
+        resolve({ assetRef: String(presign?.assetRef || '') });
       } catch (err: any) {
-        reject(err);
+        try {
+          const presignFallback = await requestPresign(true);
+          await uploadWithConfig(presignFallback);
+          resolve({ assetRef: String(presignFallback?.assetRef || '') });
+        } catch (fallbackErr: any) {
+          reject(fallbackErr);
+        }
       }
     }),
 

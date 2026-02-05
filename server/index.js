@@ -214,7 +214,7 @@ app.use(express.json());
 app.use('/uploads', express.static(UPLOADS_ROOT, { fallthrough: false }));
 
 app.post('/api/uploads/presign', async (req, res) => {
-  const { projectId, trackId, contentType, fileName, size, assetKind } = req.body || {};
+  const { projectId, trackId, contentType, fileName, size, assetKind, preferLocal } = req.body || {};
   const safeProjectId = safeSegment(projectId);
   const normalizedKind = String(assetKind || '').trim();
   const safeTrackId = safeSegment(trackId);
@@ -267,7 +267,7 @@ app.post('/api/uploads/presign', async (req, res) => {
   });
   const assetRef = createAssetRef(key);
 
-  if (s3Client) {
+  if (s3Client && !preferLocal) {
     try {
       const command = new PutObjectCommand({
         Bucket: S3_BUCKET,
