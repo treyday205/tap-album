@@ -6,6 +6,7 @@ import { StorageService } from '../services/storage';
 import { Api } from '../services/api';
 import { Project, User } from '../types';
 import { isAssetRef, resolveAssetUrl } from '../services/assets';
+import { collectBankRefs, resolveBankUrls } from '../services/assetBank';
 
 const DashboardPage: React.FC = () => {
   const navigate = useNavigate();
@@ -48,6 +49,28 @@ const DashboardPage: React.FC = () => {
       signCovers();
     }
   }, [projects]);
+
+  useEffect(() => {
+    const hydrateBankCovers = async () => {
+      const refs = collectBankRefs(projects.map((project) => project.coverImageUrl));
+      const missing = refs.filter((ref) => !assetUrls[ref]);
+      if (missing.length === 0) return;
+      try {
+        const resolved = await resolveBankUrls(missing);
+        if (Object.keys(resolved).length > 0) {
+          setAssetUrls((prev) => ({ ...prev, ...resolved }));
+        }
+      } catch (err) {
+        if (import.meta.env.DEV) {
+          console.warn('[DEV] bank cover hydration failed', err);
+        }
+      }
+    };
+
+    if (projects.length) {
+      hydrateBankCovers();
+    }
+  }, [projects, assetUrls]);
 
   const resolveAsset = (value: string) => resolveAssetUrl(value, assetUrls);
 

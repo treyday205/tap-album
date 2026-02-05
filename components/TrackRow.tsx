@@ -21,8 +21,14 @@ const TrackRow: React.FC<TrackRowProps> = ({ track, artworkUrl = '', trackNumber
   
   const isDirectAudio = url.length > 5 && (
     url.startsWith('data:audio/') ||
+    url.startsWith('blob:') ||
     url.includes('p.scdn.co') ||
     url.includes('.mp3') ||
+    url.includes('.wav') ||
+    url.includes('.m4a') ||
+    url.includes('.aac') ||
+    url.includes('.ogg') ||
+    url.includes('.flac') ||
     ((url.startsWith('http') || url.startsWith('/')) && !url.includes('open.spotify.com'))
   );
 

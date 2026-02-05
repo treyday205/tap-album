@@ -53,8 +53,10 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({ project, tracks, isPreview = 
     const url = resolveUrl(rawUrl);
     const isHttp = url.startsWith('http://') || url.startsWith('https://');
     const isRelative = url.startsWith('/');
+    const isBlob = url.startsWith('blob:');
     const isPlayable = url.length > 5 && (
       url.startsWith('data:audio/') || 
+      isBlob ||
       url.includes('p.scdn.co') || 
       ((isHttp || isRelative) && !url.includes('open.spotify.com'))
     );
@@ -106,18 +108,26 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({ project, tracks, isPreview = 
   const mp3Tracks = tracks.filter((track) => {
     const rawUrl = (track.mp3Url || "").trim();
     const resolvedUrl = resolveUrl(rawUrl);
-    const normalized = (resolvedUrl || rawUrl).toLowerCase();
+    const normalizedRaw = rawUrl.toLowerCase();
+    const normalizedResolved = resolvedUrl.toLowerCase();
     return (
       isAudioAssetRef(rawUrl) ||
-      normalized.startsWith('data:audio/mpeg') ||
-      normalized.startsWith('data:audio/mp3') ||
-      normalized.includes('p.scdn.co') ||
-      normalized.includes('.mp3') ||
-      normalized.includes('.wav') ||
-      normalized.includes('.m4a') ||
-      normalized.includes('.aac') ||
-      normalized.includes('.ogg') ||
-      normalized.includes('.flac')
+      normalizedResolved.startsWith('blob:') ||
+      normalizedResolved.startsWith('data:audio/mpeg') ||
+      normalizedResolved.startsWith('data:audio/mp3') ||
+      normalizedResolved.includes('p.scdn.co') ||
+      normalizedResolved.includes('.mp3') ||
+      normalizedResolved.includes('.wav') ||
+      normalizedResolved.includes('.m4a') ||
+      normalizedResolved.includes('.aac') ||
+      normalizedResolved.includes('.ogg') ||
+      normalizedResolved.includes('.flac') ||
+      normalizedRaw.includes('.mp3') ||
+      normalizedRaw.includes('.wav') ||
+      normalizedRaw.includes('.m4a') ||
+      normalizedRaw.includes('.aac') ||
+      normalizedRaw.includes('.ogg') ||
+      normalizedRaw.includes('.flac')
     );
   });
   const displayTracks = showAllTracks ? tracks : mp3Tracks;

@@ -14,6 +14,7 @@ import { Project, Track, ProjectLink, LinkCategory } from '../types';
 import TAPRenderer from '../components/TAPRenderer';
 import { GoogleGenAI, Type } from "@google/genai";
 import { collectAssetRefs, isAssetRef, resolveAssetUrl } from '../services/assets';
+import { collectBankRefs, resolveBankUrls, saveBankAsset } from '../services/assetBank';
 
 const EditorPage: React.FC = () => {
   const MAX_TRACKS = 24;
@@ -104,15 +105,82 @@ const EditorPage: React.FC = () => {
     }
   };
 
+  const ensureBankAssets = async (refs: string[]) => {
+    const missing = refs.filter((ref) => !assetUrls[ref]);
+    if (missing.length === 0) return;
+    try {
+      const resolved = await resolveBankUrls(missing);
+      if (Object.keys(resolved).length > 0) {
+        setAssetUrls((prev) => ({ ...prev, ...resolved }));
+      }
+    } catch (err) {
+      if (import.meta.env.DEV) {
+        console.warn('[DEV] bank asset resolution failed', err);
+      }
+    }
+  };
+
+  const readFileAsDataUrl = (file: File) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(reader.error || new Error('Failed to read file.'));
+      reader.readAsDataURL(file);
+    });
+
+  const storeLocalImageAsset = async (
+    file: File,
+    meta: { projectId: string; kind: string; trackId?: string }
+  ): Promise<string> => {
+    try {
+      const stored = await saveBankAsset(file, meta);
+      if (stored?.ref) {
+        setAssetUrls((prev) => ({ ...prev, [stored.ref]: stored.url }));
+        return stored.ref;
+      }
+    } catch (err) {
+      if (import.meta.env.DEV) {
+        console.warn('[DEV] asset bank save failed, falling back to data URL', err);
+      }
+    }
+
+    const dataUrl = await readFileAsDataUrl(file);
+    if (!dataUrl) {
+      throw new Error('Unable to store image locally.');
+    }
+    return dataUrl;
+  };
+
+  const storeLocalAudioAsset = async (
+    file: File,
+    meta: { projectId: string; trackId?: string }
+  ): Promise<string> => {
+    const stored = await saveBankAsset(file, {
+      projectId: meta.projectId,
+      trackId: meta.trackId,
+      kind: 'track-audio'
+    });
+    if (stored?.ref) {
+      setAssetUrls((prev) => ({ ...prev, [stored.ref]: stored.url }));
+      return stored.ref;
+    }
+    throw new Error('Unable to store audio locally.');
+  };
+
   useEffect(() => {
     if (!project) return;
-    const refs = collectAssetRefs([
+    const values = [
       project.coverImageUrl,
       ...tracks.map((track) => track.mp3Url),
       ...tracks.map((track) => track.artworkUrl)
-    ]);
-    if (refs.length) {
-      ensureSignedAssets(refs);
+    ];
+    const signedRefs = collectAssetRefs(values);
+    if (signedRefs.length) {
+      ensureSignedAssets(signedRefs);
+    }
+    const bankRefs = collectBankRefs(values);
+    if (bankRefs.length) {
+      ensureBankAssets(bankRefs);
     }
   }, [project, tracks, syncTick]);
 
@@ -216,18 +284,31 @@ const EditorPage: React.FC = () => {
       const uploadAudioToTrack = async (file: File, trackId: string) => {
         setUploadingTrackId(trackId);
         setUploadProgress(prev => ({ ...prev, [trackId]: 0 }));
-        const result = await Api.uploadTrackAudio(file, projectId, trackId, (percent) => {
-          setUploadProgress(prev => ({ ...prev, [trackId]: percent }));
-        });
-        const assetRef = result?.assetRef || '';
-        if (!assetRef) {
-          throw new Error('Upload did not return a file URL.');
+        try {
+          const result = await Api.uploadTrackAudio(file, projectId, trackId, (percent) => {
+            setUploadProgress(prev => ({ ...prev, [trackId]: percent }));
+          });
+          const assetRef = result?.assetRef || '';
+          if (!assetRef) {
+            throw new Error('Upload did not return a file URL.');
+          }
+          handleUpdateTrack(trackId, {
+            mp3Url: assetRef,
+            title: autoTitle(file.name)
+          });
+          ensureSignedAssets([assetRef]);
+        } catch (err) {
+          try {
+            const localRef = await storeLocalAudioAsset(file, { projectId, trackId });
+            handleUpdateTrack(trackId, {
+              mp3Url: localRef,
+              title: autoTitle(file.name)
+            });
+            setUploadError(null);
+          } catch (fallbackErr: any) {
+            throw fallbackErr || err;
+          }
         }
-        handleUpdateTrack(trackId, {
-          mp3Url: assetRef,
-          title: autoTitle(file.name)
-        });
-        ensureSignedAssets([assetRef]);
       };
 
       try {
@@ -281,14 +362,24 @@ const EditorPage: React.FC = () => {
       try {
         const result = await Api.uploadAsset(file, projectId, { assetKind: 'project-cover' });
         const assetRef = result?.assetRef || '';
-        if (assetRef) {
-          handleSaveProject({ coverImageUrl: assetRef });
-          ensureSignedAssets([assetRef]);
+        if (!assetRef) {
+          throw new Error('Upload did not return a file URL.');
         }
+        handleSaveProject({ coverImageUrl: assetRef });
+        ensureSignedAssets([assetRef]);
       } catch (err: any) {
-        const message = err?.message || 'Upload failed.';
-        setUploadError(message);
-        alert(message);
+        try {
+          const localRef = await storeLocalImageAsset(file, {
+            projectId,
+            kind: 'project-cover'
+          });
+          handleSaveProject({ coverImageUrl: localRef });
+          setUploadError(null);
+        } catch (fallbackErr: any) {
+          const message = fallbackErr?.message || err?.message || 'Upload failed.';
+          setUploadError(message);
+          alert(message);
+        }
       } finally {
         e.target.value = '';
       }
@@ -307,14 +398,25 @@ const EditorPage: React.FC = () => {
         trackId: uploadTargetTrackId
       });
       const assetRef = result?.assetRef || '';
-      if (assetRef) {
-        handleUpdateTrack(uploadTargetTrackId, { artworkUrl: assetRef });
-        ensureSignedAssets([assetRef]);
+      if (!assetRef) {
+        throw new Error('Upload did not return a file URL.');
       }
+      handleUpdateTrack(uploadTargetTrackId, { artworkUrl: assetRef });
+      ensureSignedAssets([assetRef]);
     } catch (err: any) {
-      const message = err?.message || 'Upload failed.';
-      setUploadError(message);
-      alert(message);
+      try {
+        const localRef = await storeLocalImageAsset(file, {
+          projectId,
+          trackId: uploadTargetTrackId,
+          kind: 'track-artwork'
+        });
+        handleUpdateTrack(uploadTargetTrackId, { artworkUrl: localRef });
+        setUploadError(null);
+      } catch (fallbackErr: any) {
+        const message = fallbackErr?.message || err?.message || 'Upload failed.';
+        setUploadError(message);
+        alert(message);
+      }
     } finally {
       setUploadTargetTrackId(null);
       e.target.value = '';
@@ -616,8 +718,11 @@ const EditorPage: React.FC = () => {
                   const isUploading = uploadingTrackId === track.trackId;
                   const uploadPercent = uploadProgress[track.trackId] ?? 0;
                   const isSecureAudio = isAssetRef(track.mp3Url);
+                  const isBankAudio = track.mp3Url.startsWith('bank:');
                   const displayMp3Value = track.mp3Url.startsWith('data:')
                     ? 'Local Audio File'
+                    : isBankAudio
+                      ? 'Local Audio File'
                     : isSecureAudio
                       ? 'Secure Audio File'
                       : track.mp3Url;
@@ -641,7 +746,7 @@ const EditorPage: React.FC = () => {
                             type="text"
                             value={displayMp3Value}
                             onChange={(e) => handleUpdateTrack(track.trackId, { mp3Url: e.target.value })}
-                            disabled={track.mp3Url.startsWith('data:') || isSecureAudio || isUploading}
+                            disabled={track.mp3Url.startsWith('data:') || isBankAudio || isSecureAudio || isUploading}
                             placeholder="Audio URL or Spotify Link"
                             className="flex-1 bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-2 text-sm focus:outline-none"
                           />

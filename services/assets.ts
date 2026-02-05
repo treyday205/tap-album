@@ -33,10 +33,17 @@ export const resolveAssetUrl = (
   map: Record<string, string>
 ): string => {
   if (!value) return '';
-  if (isAssetRef(value)) {
-    return map[value] || '';
+  const trimmed = String(value).trim();
+  if (map[trimmed]) {
+    return map[trimmed];
   }
-  return value;
+  if (trimmed.startsWith('bank:')) {
+    return map[trimmed] || '';
+  }
+  if (isAssetRef(trimmed)) {
+    return map[trimmed] || '';
+  }
+  return trimmed;
 };
 
 export const collectAssetRefs = (values: Array<string | undefined | null>): string[] => {

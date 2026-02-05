@@ -6,6 +6,7 @@ import TAPRenderer from '../components/TAPRenderer';
 import { Api, API_BASE_URL } from '../services/api';
 import { ShieldAlert, Mail, ArrowRight, Loader2, CheckCircle2, XCircle, Key } from 'lucide-react';
 import { collectAssetRefs, resolveAssetUrl, isAssetRef } from '../services/assets';
+import { collectBankRefs, resolveBankUrls } from '../services/assetBank';
 
 const AUTH_TOKEN_KEY = 'tap_auth_token';
 const AUTH_EMAIL_KEY = 'tap_auth_email';
@@ -161,15 +162,35 @@ const PublicTAPPage: React.FC = () => {
     }
   };
 
+  const ensureBankAssets = async (refs: string[]) => {
+    const missing = refs.filter((ref) => !assetUrls[ref]);
+    if (missing.length === 0) return;
+    try {
+      const resolved = await resolveBankUrls(missing);
+      if (Object.keys(resolved).length > 0) {
+        setAssetUrls((prev) => ({ ...prev, ...resolved }));
+      }
+    } catch (err) {
+      if (IS_DEV) {
+        console.warn('[DEV] bank asset hydration failed', err);
+      }
+    }
+  };
+
   useEffect(() => {
     if (!project || !isUnlocked) return;
-    const refs = collectAssetRefs([
+    const values = [
       project.coverImageUrl,
       ...tracks.map((track) => track.mp3Url),
       ...tracks.map((track) => track.artworkUrl)
-    ]);
-    if (refs.length) {
-      ensureSignedAssets(refs);
+    ];
+    const signedRefs = collectAssetRefs(values);
+    if (signedRefs.length) {
+      ensureSignedAssets(signedRefs);
+    }
+    const bankRefs = collectBankRefs(values);
+    if (bankRefs.length) {
+      ensureBankAssets(bankRefs);
     }
   }, [project, tracks, isUnlocked]);
 

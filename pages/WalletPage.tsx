@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 import { isAssetRef, resolveAssetUrl } from '../services/assets';
+import { collectBankRefs, resolveBankUrls } from '../services/assetBank';
 
 const WalletPage: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
@@ -81,6 +82,27 @@ const WalletPage: React.FC = () => {
 
     signCover();
   }, [project]);
+
+  useEffect(() => {
+    const hydrateBankCover = async () => {
+      if (!project) return;
+      const refs = collectBankRefs([project.coverImageUrl]);
+      const missing = refs.filter((ref) => !assetUrls[ref]);
+      if (missing.length === 0) return;
+      try {
+        const resolved = await resolveBankUrls(missing);
+        if (Object.keys(resolved).length > 0) {
+          setAssetUrls((prev) => ({ ...prev, ...resolved }));
+        }
+      } catch (err) {
+        if (import.meta.env.DEV) {
+          console.warn('[DEV] bank cover hydration failed', err);
+        }
+      }
+    };
+
+    hydrateBankCover();
+  }, [project, assetUrls]);
 
   const resolveAsset = (value: string) => resolveAssetUrl(value, assetUrls);
 
