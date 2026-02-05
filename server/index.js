@@ -17,7 +17,14 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DIST_DIR = path.join(process.cwd(), 'dist');
+const resolveDistDir = () => {
+  const cwdDist = path.join(process.cwd(), 'dist');
+  if (fs.existsSync(path.join(cwdDist, 'index.html'))) return cwdDist;
+  const relativeDist = path.join(__dirname, '..', 'dist');
+  if (fs.existsSync(path.join(relativeDist, 'index.html'))) return relativeDist;
+  return cwdDist;
+};
+const DIST_DIR = resolveDistDir();
 const INDEX_HTML = path.join(DIST_DIR, 'index.html');
 const hasFrontendBuild = () => fs.existsSync(INDEX_HTML);
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
@@ -399,7 +406,12 @@ const getTokenEmail = (req) => {
 };
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', frontend: hasFrontendBuild() });
+  res.json({
+    status: 'ok',
+    frontend: hasFrontendBuild(),
+    distDir: DIST_DIR,
+    cwd: process.cwd()
+  });
 });
 
 app.post('/api/auth/request-magic', async (req, res) => {
@@ -905,4 +917,5 @@ app.get('*', (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`Serving frontend from ${DIST_DIR} (${hasFrontendBuild() ? 'index.html found' : 'index.html missing'})`);
+  console.log(`Process CWD: ${process.cwd()}`);
 });
