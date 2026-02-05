@@ -17,8 +17,9 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DIST_DIR = path.join(__dirname, '..', 'dist');
+const DIST_DIR = path.join(process.cwd(), 'dist');
 const INDEX_HTML = path.join(DIST_DIR, 'index.html');
+const hasFrontendBuild = () => fs.existsSync(INDEX_HTML);
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 const APP_URL = process.env.APP_URL || 'http://localhost:3000';
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -398,7 +399,7 @@ const getTokenEmail = (req) => {
 };
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'ok', frontend: hasFrontendBuild() });
 });
 
 app.post('/api/auth/request-magic', async (req, res) => {
@@ -876,15 +877,32 @@ app.get('/api/projects/:slug', async (req, res) => {
   }
 });
 
-app.use(express.static(DIST_DIR));
+app.use('/assets', express.static(path.join(DIST_DIR, 'assets'), { fallthrough: false }));
+app.use(express.static(DIST_DIR, { index: false }));
+
+app.get('/', (_req, res) => {
+  if (hasFrontendBuild()) {
+    return res.sendFile(INDEX_HTML);
+  }
+  return res.status(200).json({
+    status: 'ok',
+    message: 'Frontend build not found. Run `npm run build` before starting the server.'
+  });
+});
 
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api/')) {
     return res.status(404).json({ message: 'Not found.' });
+  }
+  if (!hasFrontendBuild()) {
+    return res.status(404).json({
+      message: 'Frontend build not found. Run `npm run build` before starting the server.'
+    });
   }
   return res.sendFile(INDEX_HTML);
 });
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`Serving frontend from ${DIST_DIR} (${hasFrontendBuild() ? 'index.html found' : 'index.html missing'})`);
 });
