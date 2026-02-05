@@ -1,0 +1,7 @@
+{
+  "name": "TAP Album",
+  "description": "A production-ready mobile-first album landing page platform for artists to share music, merch, and tickets via QR or NFC.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
