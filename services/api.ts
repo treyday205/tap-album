@@ -191,6 +191,12 @@ export const Api = {
       assetKind: 'track-audio',
       trackId,
       onProgress
+    }),
+
+  adminLogin: (password: string) =>
+    request('/api/admin/login', {
+      method: 'POST',
+      body: JSON.stringify({ password })
     })
 };
 

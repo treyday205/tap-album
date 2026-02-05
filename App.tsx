@@ -8,8 +8,12 @@ import PublicTAPPage from './pages/PublicTAPPage';
 import LoginPage from './pages/LoginPage';
 import WalletPage from './pages/WalletPage';
 
+const isAdminSession = () =>
+  Boolean(localStorage.getItem('tap_admin_token')) ||
+  localStorage.getItem('tap_is_admin') === 'true';
+
 const ProtectedRoute = ({ children }: { children?: React.ReactNode }) => {
-  const isAdmin = localStorage.getItem('tap_is_admin') === 'true';
+  const isAdmin = isAdminSession();
   const location = useLocation();
 
   if (!isAdmin) {
@@ -20,7 +24,7 @@ const ProtectedRoute = ({ children }: { children?: React.ReactNode }) => {
 };
 
 const HomeRoute = () => {
-  const isAdmin = localStorage.getItem('tap_is_admin') === 'true';
+  const isAdmin = isAdminSession();
   if (isAdmin) {
     return <Navigate to="/dashboard" replace />;
   }

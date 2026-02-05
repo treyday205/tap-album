@@ -84,7 +84,10 @@ const EditorPage: React.FC = () => {
     const missing = refs.filter((ref) => isAssetRef(ref) && !assetUrls[ref]);
     if (missing.length === 0) return;
     try {
-      const token = localStorage.getItem('tap_auth_token') || undefined;
+      const token =
+        localStorage.getItem('tap_admin_token') ||
+        localStorage.getItem('tap_auth_token') ||
+        undefined;
       const response = await Api.signAssets(project.projectId, missing, token);
       const next = { ...assetUrls };
       (response.assets || []).forEach((asset: any) => {
@@ -545,10 +548,10 @@ const EditorPage: React.FC = () => {
                   <h2 className="text-xl font-black mb-6">Album Visuals</h2>
                   <div className="flex flex-col md:flex-row gap-8">
                     <div onClick={() => triggerFileUpload('PROJECT_IMAGE')} className="group relative w-48 h-48 bg-slate-800 rounded-3xl overflow-hidden cursor-pointer border-2 border-dashed border-slate-700 hover:border-green-500 transition-all flex-shrink-0">
-                      <img src={resolveAsset(project.coverImageUrl || '')} alt="Art" className="w-full h-full object-cover group-hover:opacity-40 transition-opacity" />
+                      <img src={resolveAsset(project.coverImageUrl || '')} alt="Album Art" className="w-full h-full object-cover group-hover:opacity-40 transition-opacity" />
                       <div className="absolute inset-0 flex flex-col items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-white">
                         <Camera size={24} className="mb-2" />
-                        <span className="text-[10px] font-black uppercase tracking-widest">Update Art</span>
+                        <span className="text-[10px] font-black uppercase tracking-widest">Album Art</span>
                       </div>
                     </div>
                     <div className="flex-grow space-y-6">

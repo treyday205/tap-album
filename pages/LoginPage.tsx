@@ -2,21 +2,36 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Lock, ArrowRight, ShieldCheck, Radio } from 'lucide-react';
+import { Api } from '../services/api';
 
 const LoginPage: React.FC = () => {
   const [password, setPassword] = useState('');
   const [error, setError] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const navigate = useNavigate();
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Default Access Key: 200038
-    if (password === '200038') {
+    setError(false);
+    setIsSubmitting(true);
+    try {
+      const response = await Api.adminLogin(password);
+      if (response?.token) {
+        localStorage.setItem('tap_admin_token', response.token);
+      }
       localStorage.setItem('tap_is_admin', 'true');
       navigate('/dashboard');
-    } else {
+      return;
+    } catch {
+      if (import.meta.env.DEV && password === '200038') {
+        localStorage.setItem('tap_is_admin', 'true');
+        navigate('/dashboard');
+        return;
+      }
       setError(true);
       setTimeout(() => setError(false), 2000);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -53,9 +68,10 @@ const LoginPage: React.FC = () => {
 
           <button
             type="submit"
+            disabled={isSubmitting}
             className="w-full bg-green-500 hover:bg-green-400 text-black font-black py-4 rounded-2xl flex items-center justify-center gap-2 transition-all transform active:scale-95 shadow-lg shadow-green-500/20 uppercase tracking-widest text-xs"
           >
-            Authenticate
+            {isSubmitting ? 'Authenticating...' : 'Authenticate'}
             <ArrowRight size={18} />
           </button>
         </form>

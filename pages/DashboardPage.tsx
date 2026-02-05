@@ -26,7 +26,7 @@ const DashboardPage: React.FC = () => {
         if (!isAssetRef(project.coverImageUrl)) continue;
         if (assetUrls[project.coverImageUrl]) continue;
         try {
-          const token = localStorage.getItem('tap_auth_token') || undefined;
+          const token = localStorage.getItem('tap_admin_token') || localStorage.getItem('tap_auth_token') || undefined;
           const response = await Api.signAssets(project.projectId, [project.coverImageUrl], token);
           (response.assets || []).forEach((asset: any) => {
             if (asset?.ref && asset?.url) {
@@ -53,6 +53,7 @@ const DashboardPage: React.FC = () => {
 
   const handleLogout = () => {
     localStorage.removeItem('tap_is_admin');
+    localStorage.removeItem('tap_admin_token');
     navigate('/admin');
   };
 

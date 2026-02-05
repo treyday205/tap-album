@@ -28,6 +28,7 @@ const DIST_DIR = resolveDistDir();
 const INDEX_HTML = path.join(DIST_DIR, 'index.html');
 const hasFrontendBuild = () => fs.existsSync(INDEX_HTML);
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || (process.env.NODE_ENV !== 'production' ? '200038' : '');
 const APP_URL = process.env.APP_URL || '';
 const DATABASE_URL = process.env.DATABASE_URL;
 const DATABASE_SSL = process.env.DATABASE_SSL === 'true';
@@ -382,31 +383,34 @@ const getAccessRecord = async (projectId, email, client) => {
   return inserted.rows[0];
 };
 
-const auth = (req, res, next) => {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
-  if (!token) {
-    return res.status(401).json({ message: 'Missing token.' });
-  }
-  try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    req.user = payload;
-    return next();
-  } catch (err) {
-    return res.status(401).json({ message: 'Invalid token.' });
-  }
-};
-
-const getTokenEmail = (req) => {
+const getTokenPayload = (req) => {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) return null;
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    return payload?.email || null;
+    return jwt.verify(token, JWT_SECRET);
   } catch {
     return null;
   }
+};
+
+const auth = (req, res, next) => {
+  const payload = getTokenPayload(req);
+  if (!payload || !payload.email) {
+    return res.status(401).json({ message: 'Invalid token.' });
+  }
+  req.user = payload;
+  return next();
+};
+
+const getTokenEmail = (req) => {
+  const payload = getTokenPayload(req);
+  return payload?.email || null;
+};
+
+const isAdminRequest = (req) => {
+  const payload = getTokenPayload(req);
+  return payload?.role === 'admin';
 };
 
 app.get('/health', (_req, res) => {
@@ -416,6 +420,18 @@ app.get('/health', (_req, res) => {
     distDir: DIST_DIR,
     cwd: process.cwd()
   });
+});
+
+app.post('/api/admin/login', (req, res) => {
+  const { password } = req.body || {};
+  if (!ADMIN_PASSWORD) {
+    return res.status(500).json({ message: 'Admin login is not configured.' });
+  }
+  if (!password || String(password) !== String(ADMIN_PASSWORD)) {
+    return res.status(401).json({ message: 'Invalid access key.' });
+  }
+  const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '30d' });
+  return res.json({ success: true, token });
 });
 
 app.post('/api/auth/request-magic', async (req, res) => {
@@ -577,7 +593,8 @@ app.post('/api/assets/sign', async (req, res) => {
     const projectData = projectResult.rows[0].data || {};
     const emailGateEnabled = projectData.emailGateEnabled ?? true;
 
-    if (!IS_DEV && emailGateEnabled) {
+    const isAdmin = isAdminRequest(req);
+    if (!IS_DEV && emailGateEnabled && !isAdmin) {
       const email = getTokenEmail(req);
       if (!email) {
         return res.status(401).json({ message: 'Missing token.' });
