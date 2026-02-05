@@ -7,12 +7,14 @@ import { Api } from '../services/api';
 const LoginPage: React.FC = () => {
   const [password, setPassword] = useState('');
   const [error, setError] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const navigate = useNavigate();
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(false);
+    setErrorMessage(null);
     setIsSubmitting(true);
     try {
       const response = await Api.adminLogin(password);
@@ -22,12 +24,22 @@ const LoginPage: React.FC = () => {
       localStorage.setItem('tap_is_admin', 'true');
       navigate('/dashboard');
       return;
-    } catch {
+    } catch (err: any) {
       if (import.meta.env.DEV && password === '200038') {
         localStorage.setItem('tap_is_admin', 'true');
         navigate('/dashboard');
         return;
       }
+      const message = err?.message || '';
+      const isNetworkError =
+        message.includes('Failed to fetch') ||
+        message.includes('NetworkError') ||
+        message.includes('Load failed');
+      setErrorMessage(
+        isNetworkError
+          ? 'Network error. Check APP_URL / API base or CORS.'
+          : message || 'Invalid Authorization Key'
+      );
       setError(true);
       setTimeout(() => setError(false), 2000);
     } finally {
@@ -63,7 +75,11 @@ const LoginPage: React.FC = () => {
               className={`w-full bg-slate-900 border ${error ? 'border-red-500/50' : 'border-slate-800'} group-hover:border-slate-700 focus:border-green-500 rounded-2xl px-5 py-4 outline-none transition-all text-white font-medium text-center tracking-[0.2em]`}
               autoFocus
             />
-            {error && <p className="text-red-400 text-[10px] font-black uppercase tracking-widest mt-3 text-center animate-pulse">Invalid Authorization Key</p>}
+            {error && (
+              <p className="text-red-400 text-[10px] font-black uppercase tracking-widest mt-3 text-center animate-pulse">
+                {errorMessage || 'Invalid Authorization Key'}
+              </p>
+            )}
           </div>
 
           <button

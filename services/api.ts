@@ -1,17 +1,27 @@
+const normalizeEnvBase = (value: unknown): string => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.startsWith('/')) return raw;
+  if (!/^https?:\/\//i.test(raw)) {
+    return `https://${raw}`;
+  }
+  return raw;
+};
+
 const resolveApiBase = (): string => {
-  const envBase =
+  const envBase = normalizeEnvBase(
     (process.env as any).API_BASE_URL ||
-    (import.meta as any).env?.API_BASE_URL ||
-    (import.meta as any).env?.VITE_API_BASE_URL ||
-    (import.meta as any).env?.VITE_API_URL;
+      (import.meta as any).env?.API_BASE_URL ||
+      (import.meta as any).env?.VITE_API_BASE_URL ||
+      (import.meta as any).env?.VITE_API_URL
+  );
   const isProd = Boolean((import.meta as any).env?.PROD) || process.env.NODE_ENV === 'production';
 
   if (envBase) {
-    const normalized = String(envBase).trim();
-    const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(normalized);
-    const isRelative = normalized.startsWith('/');
+    const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(envBase);
+    const isRelative = envBase.startsWith('/');
     if (!isProd || (!isLocalhost && !isRelative)) {
-      return normalized;
+      return envBase;
     }
   }
 

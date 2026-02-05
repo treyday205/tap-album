@@ -30,7 +30,26 @@ const hasFrontendBuild = () => fs.existsSync(INDEX_HTML);
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '200038';
 const UPLOAD_DEBUG = process.env.UPLOAD_DEBUG === 'true';
-const APP_URL = process.env.APP_URL || '';
+const normalizeAppUrl = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const url = new URL(withProtocol);
+    return url.origin;
+  } catch {
+    return '';
+  }
+};
+const resolveAppUrl = () => {
+  const railwayDomain =
+    process.env.RAILWAY_PUBLIC_DOMAIN ||
+    process.env.RAILWAY_PUBLIC_URL ||
+    process.env.RAILWAY_STATIC_URL ||
+    process.env.RAILWAY_URL;
+  return normalizeAppUrl(process.env.APP_URL || railwayDomain);
+};
+const APP_URL = resolveAppUrl();
 const DATABASE_URL = process.env.DATABASE_URL;
 const DATABASE_SSL = process.env.DATABASE_SSL === 'true';
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
@@ -217,18 +236,17 @@ const pool = new pg.Pool({
 });
 
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
-
-const RAILWAY_PROD_ORIGIN = 'https://tap-album-production.up.railway.app';
+const APP_ORIGIN = APP_URL ? new URL(APP_URL).origin : '';
 const ALLOWED_ORIGINS = new Set([
   'http://localhost:5173',
   'http://localhost:5174',
   'http://localhost:3000',
   'http://localhost:3001',
-  RAILWAY_PROD_ORIGIN,
-  APP_URL
+  APP_ORIGIN
 ].filter(Boolean));
 
 const CORS_ALLOW_ALL = process.env.CORS_ALLOW_ALL === 'true';
+app.set('trust proxy', 1);
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
@@ -241,6 +259,21 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use('/uploads', express.static(UPLOADS_ROOT, { fallthrough: false }));
+const resolveRequestOrigin = (req) => {
+  const headerOrigin = String(req.headers.origin || '').trim();
+  if (headerOrigin) return headerOrigin;
+  const forwardedProto = req.headers['x-forwarded-proto'];
+  const forwardedHost = req.headers['x-forwarded-host'];
+  const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+  const host = Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost;
+  if (host) {
+    return `${proto || req.protocol || 'http'}://${host}`;
+  }
+  if (req.headers.host) {
+    return `${req.protocol || 'http'}://${req.headers.host}`;
+  }
+  return '';
+};
 
 app.post('/api/uploads/presign', async (req, res) => {
   const { projectId, trackId, contentType, fileName, size, assetKind, preferLocal } = req.body || {};
@@ -480,7 +513,9 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     frontend: hasFrontendBuild(),
     distDir: DIST_DIR,
-    cwd: process.cwd()
+    cwd: process.cwd(),
+    appUrl: APP_URL || null,
+    allowedOrigins: Array.from(ALLOWED_ORIGINS)
   });
 });
 
@@ -527,8 +562,11 @@ app.post('/api/auth/request-magic', async (req, res) => {
       [verificationId, projectId, normalizedEmail, code, expiresAt]
     );
 
-    const origin = String(req.headers.origin || '').trim();
-    const baseUrl = IS_DEV && origin ? origin : APP_URL;
+    const requestOrigin = resolveRequestOrigin(req);
+    const baseUrl = APP_URL || requestOrigin;
+    if (!baseUrl) {
+      return res.status(500).json({ message: 'APP_URL is not configured.' });
+    }
     const magicLink = `${baseUrl}/${slug}?verify=${verificationId}&code=${code}&projectId=${encodeURIComponent(projectId)}`;
 
     if (resend && RESEND_FROM) {
