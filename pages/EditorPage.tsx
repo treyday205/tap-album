@@ -158,15 +158,6 @@ const EditorPage: React.FC = () => {
     }
     setUploadError(null);
 
-    const isSupportedImage = (file: File) => {
-      const mime = String(file.type || '').toLowerCase();
-      if (mime) {
-        return mime === 'image/jpeg' || mime === 'image/png';
-      }
-      const name = String(file.name || '').toLowerCase();
-      return name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.png');
-    };
-
     const isAudioUpload = type === 'TRACK_AUDIO';
     const autoTitle = (name: string) => name.replace(/\.[^/.]+$/, '').replace(/[_-]+/g, ' ').trim() || 'New Track';
     const limit = isAudioUpload ? 1024 * 1024 * 1024 : 10 * 1024 * 1024;
@@ -266,13 +257,6 @@ const EditorPage: React.FC = () => {
 
     const file = files[0];
     if (!file) {
-      e.target.value = '';
-      return;
-    }
-    if (type !== 'TRACK_AUDIO' && !isSupportedImage(file)) {
-      const message = 'Only JPG or PNG images are supported for album art.';
-      setUploadError(message);
-      alert(message);
       e.target.value = '';
       return;
     }
@@ -521,8 +505,8 @@ const EditorPage: React.FC = () => {
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col text-slate-100">
       <audio ref={audioPreviewRef} onEnded={stopPreview} className="hidden" />
-      <input type="file" ref={projectImageInputRef} className="hidden" accept="image/png,image/jpeg" onChange={(e) => handleFileUpload(e, 'PROJECT_IMAGE')} />
-      <input type="file" ref={trackImageInputRef} className="hidden" accept="image/png,image/jpeg" onChange={(e) => handleFileUpload(e, 'TRACK_IMAGE')} />
+      <input type="file" ref={projectImageInputRef} className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, 'PROJECT_IMAGE')} />
+      <input type="file" ref={trackImageInputRef} className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, 'TRACK_IMAGE')} />
       <input type="file" ref={trackAudioInputRef} className="hidden" accept="audio/*" multiple onChange={(e) => handleFileUpload(e, 'TRACK_AUDIO')} />
 
       <div className="sticky top-0 z-30 bg-slate-950/80 backdrop-blur-md border-b border-slate-800 px-6 py-4 flex items-center justify-between">
@@ -570,9 +554,6 @@ const EditorPage: React.FC = () => {
               <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300 pb-10">
                 <section className="bg-slate-900/40 p-6 rounded-3xl border border-slate-800/50">
                   <h2 className="text-xl font-black mb-6">Album Visuals</h2>
-                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-6">
-                    Album art: JPG or PNG, max 10MB
-                  </p>
                   <div className="flex flex-col md:flex-row gap-8">
                     <div onClick={() => triggerFileUpload('PROJECT_IMAGE')} className="group relative w-48 h-48 bg-slate-800 rounded-3xl overflow-hidden cursor-pointer border-2 border-dashed border-slate-700 hover:border-green-500 transition-all flex-shrink-0">
                       <img src={resolveAsset(project.coverImageUrl || '')} alt="Album Art" className="w-full h-full object-cover group-hover:opacity-40 transition-opacity" />
