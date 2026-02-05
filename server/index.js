@@ -281,11 +281,11 @@ app.post('/api/uploads/presign', async (req, res) => {
         uploadUrl,
         assetRef,
         method: 'PUT',
-        headers: { 'Content-Type': resolvedContentType }
+        headers: { 'Content-Type': resolvedContentType },
+        storage: 's3'
       });
     } catch (err) {
-      console.error('Presign upload failed:', err);
-      return res.status(500).json({ message: 'Unable to create upload URL.' });
+      console.error('Presign upload failed. Falling back to local upload:', err);
     }
   }
 
@@ -293,7 +293,8 @@ app.post('/api/uploads/presign', async (req, res) => {
     uploadUrl: `/api/uploads/local?key=${encodeURIComponent(key)}&assetKind=${encodeURIComponent(normalizedKind)}`,
     assetRef,
     method: 'PUT',
-    headers: { 'Content-Type': resolvedContentType }
+    headers: { 'Content-Type': resolvedContentType },
+    storage: 'local'
   });
 });
 
