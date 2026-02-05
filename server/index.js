@@ -29,6 +29,7 @@ const INDEX_HTML = path.join(DIST_DIR, 'index.html');
 const hasFrontendBuild = () => fs.existsSync(INDEX_HTML);
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '200038';
+const UPLOAD_DEBUG = process.env.UPLOAD_DEBUG === 'true';
 const APP_URL = process.env.APP_URL || '';
 const DATABASE_URL = process.env.DATABASE_URL;
 const DATABASE_SSL = process.env.DATABASE_SSL === 'true';
@@ -89,6 +90,24 @@ const EXT_TO_MIME = {
   gif: 'image/gif',
   avif: 'image/avif'
 };
+
+const logUpload = (...args) => {
+  if (UPLOAD_DEBUG) {
+    console.log('[UPLOAD]', ...args);
+  }
+};
+
+const hasS3Config = () =>
+  Boolean(S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY);
+
+const getStorageStatus = () => ({
+  s3Configured: hasS3Config(),
+  bucket: S3_BUCKET || null,
+  endpoint: S3_ENDPOINT || null,
+  region: S3_REGION || null,
+  forcePathStyle: S3_FORCE_PATH_STYLE || false,
+  keyPrefix: S3_KEY_PREFIX || 'assets'
+});
 
 const safeSegment = (value) => {
   const normalized = String(value || '').trim();
@@ -267,6 +286,16 @@ app.post('/api/uploads/presign', async (req, res) => {
   });
   const assetRef = createAssetRef(key);
 
+  logUpload('presign', {
+    assetKind: normalizedKind,
+    projectId: safeProjectId,
+    trackId: safeTrackId || null,
+    contentType: resolvedContentType,
+    size: declaredSize || null,
+    preferLocal: Boolean(preferLocal),
+    storage: getStorageStatus()
+  });
+
   if (s3Client && !preferLocal) {
     try {
       const command = new PutObjectCommand({
@@ -277,6 +306,7 @@ app.post('/api/uploads/presign', async (req, res) => {
       const uploadUrl = await getSignedUrl(s3Client, command, {
         expiresIn: Number.isFinite(S3_SIGNED_URL_TTL) ? S3_SIGNED_URL_TTL : 900
       });
+      logUpload('presign success', { key, storage: 's3' });
       return res.json({
         uploadUrl,
         assetRef,
@@ -286,9 +316,15 @@ app.post('/api/uploads/presign', async (req, res) => {
       });
     } catch (err) {
       console.error('Presign upload failed. Falling back to local upload:', err);
+      logUpload('presign failed', {
+        message: err?.message || String(err),
+        name: err?.name || null,
+        code: err?.code || null
+      });
     }
   }
 
+  logUpload('presign fallback', { key, storage: 'local' });
   return res.json({
     uploadUrl: `/api/uploads/local?key=${encodeURIComponent(key)}&assetKind=${encodeURIComponent(normalizedKind)}`,
     assetRef,
@@ -327,6 +363,13 @@ app.put('/api/uploads/local', async (req, res) => {
     return res.status(400).json({ message: 'Invalid upload path.' });
   }
 
+  logUpload('local upload start', {
+    key,
+    assetKind,
+    contentType,
+    declaredLength: declaredLength || null
+  });
+
   await fs.promises.mkdir(path.dirname(resolvedPath), { recursive: true });
   const tempPath = `${resolvedPath}.uploading`;
 
@@ -338,16 +381,24 @@ app.put('/api/uploads/local', async (req, res) => {
     );
     await fs.promises.rm(resolvedPath, { force: true });
     await fs.promises.rename(tempPath, resolvedPath);
+    logUpload('local upload complete', { key });
     return res.json({ success: true });
   } catch (err) {
     await fs.promises.rm(tempPath, { force: true });
     if (err && err.code === 'LIMIT_EXCEEDED') {
+      logUpload('local upload failed', { key, reason: 'LIMIT_EXCEEDED' });
       return res.status(413).json({ message: `File too large. Max ${assetKind === 'track-audio' ? '1GB' : '10MB'}.` });
     }
     if (err && err.code === 'ERR_STREAM_PREMATURE_CLOSE') {
+      logUpload('local upload failed', { key, reason: 'CANCELLED' });
       return res.status(400).json({ message: 'Upload canceled.' });
     }
     console.error('Local upload failed:', err);
+    logUpload('local upload failed', {
+      key,
+      message: err?.message || String(err),
+      name: err?.name || null
+    });
     return res.status(500).json({ message: 'Upload failed.' });
   }
 });
@@ -421,6 +472,10 @@ app.get('/health', (_req, res) => {
     distDir: DIST_DIR,
     cwd: process.cwd()
   });
+});
+
+app.get('/api/storage/status', (_req, res) => {
+  res.json(getStorageStatus());
 });
 
 app.post('/api/admin/login', (req, res) => {
