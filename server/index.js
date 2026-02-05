@@ -28,7 +28,7 @@ const DIST_DIR = resolveDistDir();
 const INDEX_HTML = path.join(DIST_DIR, 'index.html');
 const hasFrontendBuild = () => fs.existsSync(INDEX_HTML);
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || (process.env.NODE_ENV !== 'production' ? '200038' : '');
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '200038';
 const APP_URL = process.env.APP_URL || '';
 const DATABASE_URL = process.env.DATABASE_URL;
 const DATABASE_SSL = process.env.DATABASE_SSL === 'true';
@@ -940,4 +940,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`Serving frontend from ${DIST_DIR} (${hasFrontendBuild() ? 'index.html found' : 'index.html missing'})`);
   console.log(`Process CWD: ${process.cwd()}`);
+  if (!process.env.ADMIN_PASSWORD) {
+    console.warn('ADMIN_PASSWORD not set. Default admin password is in use.');
+  }
 });
