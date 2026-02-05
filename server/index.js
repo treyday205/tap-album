@@ -28,7 +28,7 @@ const DIST_DIR = resolveDistDir();
 const INDEX_HTML = path.join(DIST_DIR, 'index.html');
 const hasFrontendBuild = () => fs.existsSync(INDEX_HTML);
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
-const APP_URL = process.env.APP_URL || 'http://localhost:3000';
+const APP_URL = process.env.APP_URL || '';
 const DATABASE_URL = process.env.DATABASE_URL;
 const DATABASE_SSL = process.env.DATABASE_SSL === 'true';
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
@@ -188,17 +188,21 @@ const pool = new pg.Pool({
 
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
+const RAILWAY_PROD_ORIGIN = 'https://tap-album-production.up.railway.app';
 const ALLOWED_ORIGINS = new Set([
   'http://localhost:5173',
   'http://localhost:5174',
   'http://localhost:3000',
   'http://localhost:3001',
+  RAILWAY_PROD_ORIGIN,
   APP_URL
-]);
+].filter(Boolean));
 
+const CORS_ALLOW_ALL = process.env.CORS_ALLOW_ALL === 'true';
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
+    if (CORS_ALLOW_ALL) return cb(null, true);
     if (IS_DEV) return cb(null, true);
     if (ALLOWED_ORIGINS.has(origin)) return cb(null, true);
     return cb(new Error('Not allowed by CORS'));
