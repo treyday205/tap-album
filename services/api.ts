@@ -24,6 +24,19 @@ const resolveApiBase = (): string => {
 
 const API_BASE_URL = resolveApiBase();
 
+const reportUploadTelemetry = async (payload: Record<string, any>) => {
+  try {
+    await fetch(`${API_BASE_URL}/api/uploads/telemetry`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  } catch {
+    // best-effort logging
+  }
+};
+
 const request = async (path: string, options: RequestInit = {}) => {
   const { headers, ...rest } = options;
   const res = await fetch(`${API_BASE_URL}${path}`, {
@@ -137,11 +150,22 @@ export const Api = {
           const assetRef = String(presign?.assetRef || '');
           const method = String(presign?.method || 'PUT').toUpperCase();
           const headers = presign?.headers || {};
+          const storage = presign?.storage || 'unknown';
 
           if (!uploadUrl || !assetRef) {
             rejectUpload(new Error('Upload configuration missing.'));
             return;
           }
+
+          reportUploadTelemetry({
+            stage: 'presign',
+            storage,
+            assetKind: options.assetKind,
+            projectId,
+            trackId: options.trackId || null,
+            fileName: file.name,
+            size: file.size
+          });
 
           const resolvedUploadUrl = /^https?:\/\//i.test(uploadUrl)
             ? uploadUrl
@@ -166,6 +190,15 @@ export const Api = {
 
           xhr.onload = () => {
             if (xhr.status >= 200 && xhr.status < 300) {
+              reportUploadTelemetry({
+                stage: 'put',
+                status: xhr.status,
+                storage,
+                assetKind: options.assetKind,
+                projectId,
+                trackId: options.trackId || null,
+                fileName: file.name
+              });
               resolveUpload();
               return;
             }
@@ -176,11 +209,33 @@ export const Api = {
                 return {};
               }
             })();
+            reportUploadTelemetry({
+              stage: 'put',
+              status: xhr.status,
+              storage,
+              assetKind: options.assetKind,
+              projectId,
+              trackId: options.trackId || null,
+              fileName: file.name,
+              error: data?.message || xhr.responseText || 'upload failed'
+            });
             const message = data?.message || `Upload failed (status ${xhr.status})`;
             rejectUpload(new Error(message));
           };
 
-          xhr.onerror = () => rejectUpload(new Error(`Upload failed (status ${xhr.status || 0})`));
+          xhr.onerror = () => {
+            reportUploadTelemetry({
+              stage: 'put',
+              status: xhr.status || 0,
+              storage,
+              assetKind: options.assetKind,
+              projectId,
+              trackId: options.trackId || null,
+              fileName: file.name,
+              error: 'network error'
+            });
+            rejectUpload(new Error(`Upload failed (status ${xhr.status || 0})`));
+          };
           xhr.send(file);
         });
 

@@ -97,6 +97,8 @@ const logUpload = (...args) => {
   }
 };
 
+const logWarn = (...args) => console.warn('[WARN]', ...args);
+
 const hasS3Config = () =>
   Boolean(S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY);
 
@@ -198,6 +200,10 @@ const s3Client =
 
 if (!s3Client) {
   console.warn('S3/R2 storage is not configured. Uploads will use local storage.');
+}
+
+if (process.env.NODE_ENV === 'production' && JWT_SECRET === 'dev-secret') {
+  logWarn('JWT_SECRET is using the default dev-secret. Set a strong secret in Railway.');
 }
 
 if (!DATABASE_URL) {
@@ -480,6 +486,14 @@ app.get('/health', (_req, res) => {
 
 app.get('/api/storage/status', (_req, res) => {
   res.json(getStorageStatus());
+});
+
+app.post('/api/uploads/telemetry', (req, res) => {
+  if (!UPLOAD_DEBUG) {
+    return res.json({ ok: true });
+  }
+  logUpload('telemetry', req.body || {});
+  return res.json({ ok: true });
 });
 
 app.post('/api/admin/login', (req, res) => {
@@ -860,6 +874,13 @@ app.post('/api/projects/sync', async (req, res) => {
                      updated_at = NOW()`,
       [project.projectId, normalizedSlug, title, artistName, coverImageUrl, published, payload]
     );
+
+    if (UPLOAD_DEBUG && coverImageUrl) {
+      logUpload('project sync cover', {
+        projectId: project.projectId,
+        coverImageUrl
+      });
+    }
 
     await client.query('DELETE FROM tracks WHERE project_id = $1', [project.projectId]);
 
