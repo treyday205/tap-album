@@ -758,18 +758,18 @@ app.post('/api/assets/sign', async (req, res) => {
     const emailGateEnabled = projectData.emailGateEnabled ?? true;
 
     const isAdmin = isAdminRequest(req);
+    let isUnlocked = false;
     if (!IS_DEV && emailGateEnabled && !isAdmin) {
       const email = getTokenEmail(req);
-      if (!email) {
-        return res.status(401).json({ message: 'Missing token.' });
+      if (email) {
+        const accessResult = await query(
+          'SELECT unlocked FROM access_records WHERE project_id = $1 AND email = $2 LIMIT 1',
+          [safeProjectId, normalizeEmail(email)]
+        );
+        isUnlocked = accessResult.rows.length > 0 && Boolean(accessResult.rows[0].unlocked);
       }
-      const accessResult = await query(
-        'SELECT unlocked FROM access_records WHERE project_id = $1 AND email = $2 LIMIT 1',
-        [safeProjectId, normalizeEmail(email)]
-      );
-      if (accessResult.rows.length === 0 || !accessResult.rows[0].unlocked) {
-        return res.status(403).json({ message: 'Album not unlocked.' });
-      }
+    } else {
+      isUnlocked = true;
     }
 
     const signedAssets = [];
@@ -779,6 +779,10 @@ app.post('/api/assets/sign', async (req, res) => {
         continue;
       }
       if (!key.includes(`/${safeProjectId}/`)) {
+        continue;
+      }
+      const isAudioKey = key.includes('/audio/') && key.includes(`/${safeProjectId}/`);
+      if (!isUnlocked && isAudioKey) {
         continue;
       }
 
