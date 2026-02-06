@@ -161,6 +161,7 @@ export const Api = {
           const method = String(presign?.method || 'PUT').toUpperCase();
           const headers = presign?.headers || {};
           const storage = presign?.storage || 'unknown';
+          const cacheControl = String(presign?.cacheControl || '3600');
 
           if (!uploadUrl || !assetRef) {
             rejectUpload(new Error('Upload configuration missing.'));
@@ -195,6 +196,7 @@ export const Api = {
 
           Object.entries(headers).forEach(([key, value]) => {
             if (value === undefined || value === null) return;
+            if (storage === 'supabase' && key.toLowerCase() === 'content-type') return;
             xhr.setRequestHeader(key, String(value));
           });
 
@@ -246,6 +248,15 @@ export const Api = {
             });
             rejectUpload(new Error(`Upload failed (status ${xhr.status || 0})`));
           };
+
+          if (storage === 'supabase') {
+            const form = new FormData();
+            form.append('cacheControl', cacheControl);
+            form.append('', file);
+            xhr.send(form);
+            return;
+          }
+
           xhr.send(file);
         });
 

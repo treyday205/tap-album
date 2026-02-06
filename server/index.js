@@ -12,6 +12,7 @@ import { Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -68,6 +69,11 @@ const S3_SECRET_ACCESS_KEY = process.env.S3_SECRET_ACCESS_KEY;
 const S3_FORCE_PATH_STYLE = process.env.S3_FORCE_PATH_STYLE === 'true';
 const S3_KEY_PREFIX = process.env.S3_KEY_PREFIX || 'assets';
 const S3_SIGNED_URL_TTL = Number(process.env.S3_SIGNED_URL_TTL || 900);
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET;
+const SUPABASE_SIGNED_URL_TTL = Number(process.env.SUPABASE_SIGNED_URL_TTL || 900);
+const SUPABASE_CACHE_CONTROL = process.env.SUPABASE_CACHE_CONTROL || '3600';
 
 const ASSET_REF_PREFIX = 'asset:';
 
@@ -120,8 +126,13 @@ const logWarn = (...args) => console.warn('[WARN]', ...args);
 
 const hasS3Config = () =>
   Boolean(S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY);
+const hasSupabaseConfig = () =>
+  Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY && SUPABASE_BUCKET);
 
 const getStorageStatus = () => ({
+  supabaseConfigured: hasSupabaseConfig(),
+  supabaseUrl: SUPABASE_URL || null,
+  supabaseBucket: SUPABASE_BUCKET || null,
   s3Configured: hasS3Config(),
   bucket: S3_BUCKET || null,
   endpoint: S3_ENDPOINT || null,
@@ -217,8 +228,22 @@ const s3Client =
       })
     : null;
 
+const supabase =
+  hasSupabaseConfig()
+    ? createSupabaseClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+          detectSessionInUrl: false
+        }
+      })
+    : null;
+
 if (!s3Client) {
   console.warn('S3/R2 storage is not configured. Uploads will use local storage.');
+}
+if (!supabase) {
+  console.warn('Supabase storage is not configured. Uploads will use S3/R2 or local storage.');
 }
 
 if (process.env.NODE_ENV === 'production' && JWT_SECRET === 'dev-secret') {
@@ -338,6 +363,33 @@ app.post('/api/uploads/presign', async (req, res) => {
     preferLocal: Boolean(preferLocal),
     storage: getStorageStatus()
   });
+
+  if (supabase && !preferLocal) {
+    try {
+      const { data, error } = await supabase
+        .storage
+        .from(SUPABASE_BUCKET)
+        .createSignedUploadUrl(key, { upsert: true });
+      if (error || !data?.signedUrl) {
+        throw error || new Error('Supabase signed upload failed.');
+      }
+      logUpload('presign success', { key, storage: 'supabase' });
+      return res.json({
+        uploadUrl: data.signedUrl,
+        assetRef,
+        method: 'PUT',
+        headers: { 'x-upsert': 'true' },
+        cacheControl: SUPABASE_CACHE_CONTROL,
+        storage: 'supabase'
+      });
+    } catch (err) {
+      console.error('Supabase presign upload failed. Falling back:', err);
+      logUpload('presign failed', {
+        message: err?.message || String(err),
+        name: err?.name || null
+      });
+    }
+  }
 
   if (s3Client && !preferLocal) {
     try {
@@ -730,7 +782,17 @@ app.post('/api/assets/sign', async (req, res) => {
         continue;
       }
 
-      if (s3Client) {
+      if (supabase) {
+        const { data, error } = await supabase
+          .storage
+          .from(SUPABASE_BUCKET)
+          .createSignedUrl(key, SUPABASE_SIGNED_URL_TTL);
+        if (error || !data?.signedUrl) {
+          console.error('Supabase signed URL failed:', error?.message || error);
+          continue;
+        }
+        signedAssets.push({ ref, url: data.signedUrl });
+      } else if (s3Client) {
         const command = new GetObjectCommand({
           Bucket: S3_BUCKET,
           Key: key
@@ -939,6 +1001,14 @@ app.post('/api/projects/sync', async (req, res) => {
     }
 
     await client.query('COMMIT');
+    if (UPLOAD_DEBUG) {
+      logUpload('project sync', {
+        projectId: project.projectId,
+        slug: normalizedSlug,
+        tracks: trackRows.length,
+        coverImageUrl: coverImageUrl || null
+      });
+    }
     if (IS_DEV) {
       console.log('[DEV] project sync', {
         projectId: project.projectId,
