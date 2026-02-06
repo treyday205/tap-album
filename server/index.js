@@ -70,10 +70,28 @@ const S3_FORCE_PATH_STYLE = process.env.S3_FORCE_PATH_STYLE === 'true';
 const S3_KEY_PREFIX = process.env.S3_KEY_PREFIX || 'assets';
 const S3_SIGNED_URL_TTL = Number(process.env.S3_SIGNED_URL_TTL || 900);
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_SERVICE_ROLE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SERVICE_KEY ||
+  process.env.SUPABASE_SECRET_KEY;
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET;
 const SUPABASE_SIGNED_URL_TTL = Number(process.env.SUPABASE_SIGNED_URL_TTL || 900);
 const SUPABASE_CACHE_CONTROL = process.env.SUPABASE_CACHE_CONTROL || '3600';
+const getSupabaseKeyType = (key) => {
+  if (!key) return 'missing';
+  const trimmed = String(key).trim();
+  if (/^sb_publishable_/i.test(trimmed) || /^sbp_/i.test(trimmed) || /publishable/i.test(trimmed)) {
+    return 'publishable';
+  }
+  if (/^sb_secret_/i.test(trimmed) || /^sbs_/i.test(trimmed) || /service_role/i.test(trimmed)) {
+    return 'service';
+  }
+  if (trimmed.startsWith('eyJ')) {
+    return 'jwt';
+  }
+  return 'unknown';
+};
+const SUPABASE_KEY_TYPE = getSupabaseKeyType(SUPABASE_SERVICE_ROLE_KEY);
 
 const ASSET_REF_PREFIX = 'asset:';
 
@@ -127,12 +145,14 @@ const logWarn = (...args) => console.warn('[WARN]', ...args);
 const hasS3Config = () =>
   Boolean(S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY);
 const hasSupabaseConfig = () =>
-  Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY && SUPABASE_BUCKET);
+  Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY && SUPABASE_BUCKET) &&
+  SUPABASE_KEY_TYPE !== 'publishable';
 
 const getStorageStatus = () => ({
   supabaseConfigured: hasSupabaseConfig(),
   supabaseUrl: SUPABASE_URL || null,
   supabaseBucket: SUPABASE_BUCKET || null,
+  supabaseKeyType: SUPABASE_KEY_TYPE,
   s3Configured: hasS3Config(),
   bucket: S3_BUCKET || null,
   endpoint: S3_ENDPOINT || null,
@@ -244,6 +264,9 @@ if (!s3Client) {
 }
 if (!supabase) {
   console.warn('Supabase storage is not configured. Uploads will use S3/R2 or local storage.');
+  if (SUPABASE_KEY_TYPE === 'publishable') {
+    console.warn('Supabase key appears to be publishable. Use the service role (secret) key on the server.');
+  }
 }
 
 if (process.env.NODE_ENV === 'production' && JWT_SECRET === 'dev-secret') {
