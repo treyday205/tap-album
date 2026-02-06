@@ -261,6 +261,21 @@ const pool = new pg.Pool({
 });
 
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
+
+const ensureSchema = async () => {
+  try {
+    const result = await pool.query("SELECT to_regclass('public.projects') AS exists");
+    if (result.rows[0]?.exists) {
+      return;
+    }
+    const schemaPath = path.join(__dirname, 'schema.sql');
+    const schemaSql = await fs.promises.readFile(schemaPath, 'utf8');
+    await pool.query(schemaSql);
+    console.log('✅ Database schema initialized.');
+  } catch (err) {
+    console.error('Database schema initialization failed:', err);
+  }
+};
 const APP_ORIGIN = APP_URL ? new URL(APP_URL).origin : '';
 const ALLOWED_ORIGINS = new Set([
   'http://localhost:5173',
@@ -1128,11 +1143,16 @@ app.get('*', (req, res) => {
   return res.sendFile(INDEX_HTML);
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`Serving frontend from ${DIST_DIR} (${hasFrontendBuild() ? 'index.html found' : 'index.html missing'})`);
-  console.log(`Process CWD: ${process.cwd()}`);
-  if (!process.env.ADMIN_PASSWORD) {
-    console.warn('ADMIN_PASSWORD not set. Default admin password is in use.');
-  }
-});
+const startServer = async () => {
+  await ensureSchema();
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`Serving frontend from ${DIST_DIR} (${hasFrontendBuild() ? 'index.html found' : 'index.html missing'})`);
+    console.log(`Process CWD: ${process.cwd()}`);
+    if (!process.env.ADMIN_PASSWORD) {
+      console.warn('ADMIN_PASSWORD not set. Default admin password is in use.');
+    }
+  });
+};
+
+startServer();
