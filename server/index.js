@@ -263,13 +263,18 @@ const pool = new pg.Pool({
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
 const ensureSchema = async () => {
+  if (process.env.DB_INIT_DISABLE === 'true') {
+    console.warn('[DB INIT] Disabled via DB_INIT_DISABLE=true');
+    return;
+  }
+  const schemaPath = path.join(__dirname, 'schema.sql');
   try {
-    const result = await pool.query("SELECT to_regclass('public.projects') AS exists");
-    if (result.rows[0]?.exists) {
+    if (!fs.existsSync(schemaPath)) {
+      console.error(`[DB INIT] schema.sql not found at ${schemaPath}`);
       return;
     }
-    const schemaPath = path.join(__dirname, 'schema.sql');
     const schemaSql = await fs.promises.readFile(schemaPath, 'utf8');
+    console.log(`[DB INIT] Applying schema from ${schemaPath} (${schemaSql.length} chars)`);
     await pool.query(schemaSql);
     console.log('✅ Database schema initialized.');
   } catch (err) {
