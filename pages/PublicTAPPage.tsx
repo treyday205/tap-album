@@ -7,6 +7,12 @@ import { Api, API_BASE_URL } from '../services/api';
 import { ShieldAlert, Mail, ArrowRight, Loader2, CheckCircle2, XCircle, Key } from 'lucide-react';
 import { collectAssetRefs, resolveAssetUrl, isAssetRef } from '../services/assets';
 import { collectBankRefs, resolveBankUrls } from '../services/assetBank';
+import {
+  buildSupabaseEmailRedirectUrl,
+  hasSupabaseAuthUrlState,
+  isSupabaseAuthEnabled,
+  supabaseAuthClient
+} from '../services/supabaseAuth';
 
 const AUTH_TOKEN_KEY = 'tap_auth_token';
 const AUTH_EMAIL_KEY = 'tap_auth_email';
@@ -32,6 +38,9 @@ const PublicTAPPage: React.FC = () => {
   const [autoVerifyPayload, setAutoVerifyPayload] = useState<{ verificationId: string; code: string } | null>(null);
   const [routeProjectId, setRouteProjectId] = useState<string | null>(null);
   const autoVerifyRef = useRef(false);
+  const supabaseExchangeInFlightRef = useRef<Promise<string | null> | null>(null);
+  const lastSupabaseAccessTokenRef = useRef<string | null>(null);
+  const cleanedSupabaseUrlRef = useRef(false);
 
   const [isSending, setIsSending] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
@@ -102,10 +111,15 @@ const PublicTAPPage: React.FC = () => {
       setStep('code');
       setShowModal(true);
       setAutoVerifyPayload({ verificationId: verify, code });
+      return;
+    }
+    if (hasSupabaseAuthUrlState()) {
+      setShowModal(true);
     }
   }, []);
 
   useEffect(() => {
+    let canceled = false;
     const checkAccess = async () => {
       if (!project) return;
       const gateEnabled = project.emailGateEnabled ?? true;
@@ -114,14 +128,16 @@ const PublicTAPPage: React.FC = () => {
         return;
       }
 
-      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const token = await ensureAppToken(project.projectId);
       if (!token) {
+        if (canceled) return;
         setIsUnlocked(false);
         return;
       }
 
       try {
         const status = await Api.getAccessStatus(project.projectId, token);
+        if (canceled) return;
         setRemaining(status.remaining ?? null);
         if (status.unlocked) {
           setIsUnlocked(true);
@@ -129,13 +145,18 @@ const PublicTAPPage: React.FC = () => {
           setIsUnlocked(false);
         }
       } catch (err) {
+        if (canceled) return;
         localStorage.removeItem(AUTH_TOKEN_KEY);
         localStorage.removeItem(AUTH_EMAIL_KEY);
+        lastSupabaseAccessTokenRef.current = null;
         setIsUnlocked(false);
       }
     };
 
     checkAccess();
+    return () => {
+      canceled = true;
+    };
   }, [project]);
 
   const resolveAsset = (value: string) => resolveAssetUrl(value, assetUrls);
@@ -207,6 +228,11 @@ const PublicTAPPage: React.FC = () => {
   const resetAuth = () => {
     localStorage.removeItem(AUTH_TOKEN_KEY);
     localStorage.removeItem(AUTH_EMAIL_KEY);
+    lastSupabaseAccessTokenRef.current = null;
+    supabaseExchangeInFlightRef.current = null;
+    if (supabaseAuthClient) {
+      void supabaseAuthClient.auth.signOut();
+    }
     setIssuedPin(null);
     setPinInput('');
     setRemaining(null);
@@ -214,17 +240,64 @@ const PublicTAPPage: React.FC = () => {
     setStep('email');
   };
 
+  const persistAuthPayload = (payload: any) => {
+    if (!payload?.token || !payload?.email) return;
+    localStorage.setItem(AUTH_TOKEN_KEY, payload.token);
+    localStorage.setItem(AUTH_EMAIL_KEY, payload.email);
+    setRemaining(payload.remaining ?? null);
+  };
+
+  const exchangeSupabaseSession = async (projectId: string, accessToken: string): Promise<string | null> => {
+    if (!projectId || !accessToken) return null;
+    const existingToken = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (lastSupabaseAccessTokenRef.current === accessToken && existingToken) {
+      return existingToken;
+    }
+    const response = await Api.exchangeSupabaseSession(projectId, accessToken);
+    persistAuthPayload(response);
+    lastSupabaseAccessTokenRef.current = accessToken;
+    return response.token || null;
+  };
+
+  const ensureAppToken = async (projectId: string): Promise<string | null> => {
+    const existingToken = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (existingToken) return existingToken;
+    if (!projectId || !isSupabaseAuthEnabled || !supabaseAuthClient) return null;
+    if (supabaseExchangeInFlightRef.current) {
+      return supabaseExchangeInFlightRef.current;
+    }
+
+    const run = (async () => {
+      const { data, error } = await supabaseAuthClient.auth.getSession();
+      if (error || !data?.session?.access_token) {
+        if (IS_DEV && error) {
+          console.warn('[DEBUG] supabase session fetch failed', error.message || error);
+        }
+        return null;
+      }
+      return exchangeSupabaseSession(projectId, data.session.access_token);
+    })().finally(() => {
+      supabaseExchangeInFlightRef.current = null;
+    });
+
+    supabaseExchangeInFlightRef.current = run;
+    return run;
+  };
+
   const openModal = async () => {
     resetModal();
     setShowModal(true);
-    const token = localStorage.getItem(AUTH_TOKEN_KEY);
-    if (!token) {
+    const effectiveProjectId = project?.projectId || routeProjectId;
+    if (!effectiveProjectId) {
       setStep('email');
       return;
     }
 
-    const effectiveProjectId = project?.projectId || routeProjectId;
-    if (!effectiveProjectId) {
+    let token = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (!token) {
+      token = await ensureAppToken(effectiveProjectId);
+    }
+    if (!token) {
       setStep('email');
       return;
     }
@@ -260,11 +333,35 @@ const PublicTAPPage: React.FC = () => {
       setError('Missing album slug.');
       return;
     }
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail) {
+      setError('Email is required.');
+      return;
+    }
     setIsSending(true);
     setError(null);
 
     try {
-      const response = await Api.requestMagicLink(email.trim(), project.projectId, slugValue);
+      setEmail(normalizedEmail);
+      if (isSupabaseAuthEnabled && supabaseAuthClient) {
+        const redirectTo = buildSupabaseEmailRedirectUrl(slugValue, project.projectId);
+        const { error: otpError } = await supabaseAuthClient.auth.signInWithOtp({
+          email: normalizedEmail,
+          options: {
+            shouldCreateUser: true,
+            emailRedirectTo: redirectTo
+          }
+        });
+        if (otpError) {
+          throw otpError;
+        }
+        setVerificationId('supabase');
+        setDevCode(null);
+        setStep('code');
+        return;
+      }
+
+      const response = await Api.requestMagicLink(normalizedEmail, project.projectId, slugValue);
       setVerificationId(response.verificationId);
       setDevCode(response.devCode || null);
       setStep('code');
@@ -289,9 +386,7 @@ const PublicTAPPage: React.FC = () => {
         });
       }
       const response = await Api.verifyMagicLink(id, code.trim());
-      localStorage.setItem(AUTH_TOKEN_KEY, response.token);
-      localStorage.setItem(AUTH_EMAIL_KEY, response.email);
-      setRemaining(response.remaining ?? null);
+      persistAuthPayload(response);
       setStep('pin');
       await handleIssuePin(response.token, response.projectId);
     } catch (err: any) {
@@ -301,8 +396,65 @@ const PublicTAPPage: React.FC = () => {
     }
   };
 
+  const performSupabaseOtpVerify = async (projectId: string, code: string) => {
+    if (!supabaseAuthClient) {
+      throw new Error('Supabase auth is not configured.');
+    }
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail) {
+      throw new Error('Enter the same email you used for the magic link.');
+    }
+
+    let { data, error: verifyError } = await supabaseAuthClient.auth.verifyOtp({
+      email: normalizedEmail,
+      token: code.trim(),
+      type: 'email'
+    });
+    if (verifyError) {
+      const retry = await supabaseAuthClient.auth.verifyOtp({
+        email: normalizedEmail,
+        token: code.trim(),
+        type: 'magiclink'
+      });
+      data = retry.data;
+      verifyError = retry.error;
+    }
+    if (verifyError) {
+      throw verifyError;
+    }
+    const accessToken =
+      data?.session?.access_token ||
+      (await supabaseAuthClient.auth.getSession()).data.session?.access_token;
+    if (!accessToken) {
+      throw new Error('Email verified but no session was created.');
+    }
+    const appToken = await exchangeSupabaseSession(projectId, accessToken);
+    if (!appToken) {
+      throw new Error('Could not create app session.');
+    }
+    setStep('pin');
+    await handleIssuePin(appToken, projectId);
+  };
+
   const handleVerifyMagic = async (e: React.FormEvent) => {
     e.preventDefault();
+    const effectiveProjectId = project?.projectId || routeProjectId;
+    if (!effectiveProjectId) {
+      setError('Missing project ID for verification.');
+      return;
+    }
+    if (isSupabaseAuthEnabled && supabaseAuthClient) {
+      setIsVerifying(true);
+      setError(null);
+      try {
+        await performSupabaseOtpVerify(effectiveProjectId, magicCode);
+      } catch (err: any) {
+        setError(err.message || 'Verification failed.');
+      } finally {
+        setIsVerifying(false);
+      }
+      return;
+    }
     if (!verificationId) return;
     await performVerifyMagic(verificationId, magicCode);
   };
@@ -316,13 +468,75 @@ const PublicTAPPage: React.FC = () => {
     });
   }, [autoVerifyPayload, project]);
 
+  useEffect(() => {
+    if (!project || !isSupabaseAuthEnabled || !supabaseAuthClient) return;
+    let canceled = false;
+
+    const clearSupabaseUrlState = () => {
+      if (cleanedSupabaseUrlRef.current) return;
+      const url = new URL(window.location.href);
+      if (url.searchParams.get('verify')) return;
+      const authParamKeys = ['code', 'type', 'access_token', 'refresh_token', 'token_type', 'expires_in', 'expires_at'];
+      let mutated = false;
+      authParamKeys.forEach((key) => {
+        if (url.searchParams.has(key)) {
+          url.searchParams.delete(key);
+          mutated = true;
+        }
+      });
+      if (url.hash && /(access_token=|refresh_token=|type=magiclink|type=recovery)/i.test(url.hash)) {
+        url.hash = '';
+        mutated = true;
+      }
+      if (mutated) {
+        cleanedSupabaseUrlRef.current = true;
+        window.history.replaceState({}, document.title, `${url.pathname}${url.search}`);
+      }
+    };
+
+    const hydrateFromSupabaseSession = async () => {
+      try {
+        const { data, error } = await supabaseAuthClient.auth.getSession();
+        if (canceled || error || !data?.session?.access_token) {
+          return;
+        }
+        await exchangeSupabaseSession(project.projectId, data.session.access_token);
+        clearSupabaseUrlState();
+      } catch (err) {
+        if (IS_DEV) {
+          console.warn('[DEBUG] supabase session hydration failed', err);
+        }
+      }
+    };
+
+    void hydrateFromSupabaseSession();
+
+    const { data: authSubscription } = supabaseAuthClient.auth.onAuthStateChange((_event, session) => {
+      if (canceled || !session?.access_token) return;
+      void exchangeSupabaseSession(project.projectId, session.access_token)
+        .then(() => {
+          clearSupabaseUrlState();
+        })
+        .catch((err) => {
+          if (IS_DEV) {
+            console.warn('[DEBUG] supabase auth state exchange failed', err);
+          }
+        });
+    });
+
+    return () => {
+      canceled = true;
+      authSubscription.subscription.unsubscribe();
+    };
+  }, [project]);
+
   const handleIssuePin = async (tokenOverride?: string, projectIdOverride?: string) => {
     const effectiveProjectId = projectIdOverride || project?.projectId || routeProjectId;
     if (!effectiveProjectId) {
       setError('Missing project ID for PIN issuance.');
       return;
     }
-    const token = tokenOverride || localStorage.getItem(AUTH_TOKEN_KEY);
+    const token = tokenOverride || (await ensureAppToken(effectiveProjectId));
     if (!token) return;
 
     setIsIssuing(true);
@@ -345,7 +559,7 @@ const PublicTAPPage: React.FC = () => {
       setError('Missing project ID for PIN verification.');
       return;
     }
-    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    const token = await ensureAppToken(effectiveProjectId);
     if (!token) return;
 
     setIsUnlocking(true);
@@ -470,7 +684,9 @@ const PublicTAPPage: React.FC = () => {
                       required
                     />
                     <p className="mt-2 text-[10px] text-slate-500 font-bold uppercase tracking-widest">
-                      Check your email for the magic link or enter the code.
+                      {isSupabaseAuthEnabled
+                        ? 'Click the email magic link. If a 6-digit code is included, enter it here.'
+                        : 'Check your email for the magic link or enter the code.'}
                     </p>
                     {devCode && (
                       <p className="mt-2 text-[10px] text-slate-500 font-bold uppercase tracking-widest">

@@ -79,6 +79,17 @@ export const Api = {
       body: JSON.stringify({ verificationId, code })
     }),
 
+  exchangeSupabaseSession: (projectId: string, accessToken: string) =>
+    request('/api/auth/supabase/exchange', {
+      method: 'POST',
+      body: JSON.stringify({ projectId, accessToken })
+    }),
+
+  getAuthConfig: () =>
+    request('/api/auth/config', {
+      method: 'GET'
+    }),
+
   getAccessStatus: (projectId: string, token: string) =>
     request('/api/access/status', {
       method: 'POST',

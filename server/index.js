@@ -42,6 +42,17 @@ const normalizeAppUrl = (value) => {
     return '';
   }
 };
+const normalizeRedirectUrl = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const url = new URL(withProtocol);
+    return `${url.origin}${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return '';
+  }
+};
 const resolveAppUrl = () => {
   const railwayDomain =
     process.env.RAILWAY_PUBLIC_DOMAIN ||
@@ -74,9 +85,19 @@ const SUPABASE_SERVICE_ROLE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   process.env.SUPABASE_SERVICE_KEY ||
   process.env.SUPABASE_SECRET_KEY;
+const SUPABASE_ANON_KEY =
+  process.env.SUPABASE_ANON_KEY ||
+  process.env.SUPABASE_PUBLISHABLE_KEY ||
+  process.env.VITE_SUPABASE_ANON_KEY ||
+  process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET;
 const SUPABASE_SIGNED_URL_TTL = Number(process.env.SUPABASE_SIGNED_URL_TTL || 900);
 const SUPABASE_CACHE_CONTROL = process.env.SUPABASE_CACHE_CONTROL || '3600';
+const SUPABASE_AUTH_SITE_URL = normalizeAppUrl(process.env.SUPABASE_AUTH_SITE_URL || APP_URL);
+const SUPABASE_AUTH_REDIRECT_URLS = String(process.env.SUPABASE_AUTH_REDIRECT_URLS || '')
+  .split(',')
+  .map((value) => normalizeRedirectUrl(value))
+  .filter(Boolean);
 const getSupabaseKeyType = (key) => {
   if (!key) return 'missing';
   const trimmed = String(key).trim();
@@ -144,12 +165,19 @@ const logWarn = (...args) => console.warn('[WARN]', ...args);
 
 const hasS3Config = () =>
   Boolean(S3_BUCKET && S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY);
-const hasSupabaseConfig = () =>
-  Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY && SUPABASE_BUCKET) &&
+const hasSupabaseAdminConfig = () =>
+  Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) &&
   SUPABASE_KEY_TYPE !== 'publishable';
+const hasSupabaseConfig = () =>
+  Boolean(SUPABASE_BUCKET) &&
+  hasSupabaseAdminConfig();
+const hasSupabaseAuthClientConfig = () =>
+  Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
 
 const getStorageStatus = () => ({
   supabaseConfigured: hasSupabaseConfig(),
+  supabaseAdminConfigured: hasSupabaseAdminConfig(),
+  supabaseAuthClientConfigured: hasSupabaseAuthClientConfig(),
   supabaseUrl: SUPABASE_URL || null,
   supabaseBucket: SUPABASE_BUCKET || null,
   supabaseKeyType: SUPABASE_KEY_TYPE,
@@ -248,8 +276,8 @@ const s3Client =
       })
     : null;
 
-const supabase =
-  hasSupabaseConfig()
+const supabaseAdmin =
+  hasSupabaseAdminConfig()
     ? createSupabaseClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
         auth: {
           autoRefreshToken: false,
@@ -258,9 +286,13 @@ const supabase =
         }
       })
     : null;
+const supabase = hasSupabaseConfig() ? supabaseAdmin : null;
 
 if (!s3Client) {
   console.warn('S3/R2 storage is not configured. Uploads will use local storage.');
+}
+if (!supabaseAdmin) {
+  console.warn('Supabase admin client is not configured. Supabase Auth exchange and storage signing are disabled.');
 }
 if (!supabase) {
   console.warn('Supabase storage is not configured. Uploads will use S3/R2 or local storage.');
@@ -341,6 +373,33 @@ const resolveRequestOrigin = (req) => {
     return `${req.protocol || 'http'}://${req.headers.host}`;
   }
   return '';
+};
+const getAuthOrigins = (req) =>
+  Array.from(
+    new Set([
+      APP_URL,
+      APP_ORIGIN,
+      resolveRequestOrigin(req),
+      'http://localhost:5173',
+      'http://localhost:5174',
+      'http://localhost:3000'
+    ]
+      .map((value) => normalizeAppUrl(value))
+      .filter(Boolean))
+  );
+
+const getSupabaseAuthDiagnostics = (req) => {
+  const origins = getAuthOrigins(req);
+  return {
+    enabled: hasSupabaseAuthClientConfig(),
+    siteUrl: SUPABASE_AUTH_SITE_URL || origins[0] || '',
+    redirectUrls:
+      SUPABASE_AUTH_REDIRECT_URLS.length > 0
+        ? SUPABASE_AUTH_REDIRECT_URLS
+        : origins.map((origin) => `${origin}/*`),
+    appUrl: APP_URL || null,
+    supabaseUrl: SUPABASE_URL || null
+  };
 };
 
 app.post('/api/uploads/presign', async (req, res) => {
@@ -573,6 +632,26 @@ const getAccessRecord = async (projectId, email, client) => {
   return inserted.rows[0];
 };
 
+const issueVerifiedAccessToken = async (projectId, email) => {
+  if (!projectId || !email) {
+    throw new Error('projectId and email are required.');
+  }
+  const access = await getAccessRecord(projectId, email);
+  await query(
+    'UPDATE access_records SET verified = true, verified_at = NOW(), updated_at = NOW() WHERE id = $1',
+    [access.id]
+  );
+  const token = jwt.sign({ email: access.email }, JWT_SECRET, { expiresIn: '365d' });
+  return {
+    success: true,
+    token,
+    email: access.email,
+    projectId: access.project_id,
+    remaining: access.remaining,
+    unlocked: access.unlocked
+  };
+};
+
 const getTokenPayload = (req) => {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
@@ -610,12 +689,18 @@ app.get('/health', (_req, res) => {
     distDir: DIST_DIR,
     cwd: process.cwd(),
     appUrl: APP_URL || null,
+    supabaseAuthClientConfigured: hasSupabaseAuthClientConfig(),
+    supabaseAdminConfigured: hasSupabaseAdminConfig(),
     allowedOrigins: Array.from(ALLOWED_ORIGINS)
   });
 });
 
 app.get('/api/storage/status', (_req, res) => {
   res.json(getStorageStatus());
+});
+
+app.get('/api/auth/config', (req, res) => {
+  res.json(getSupabaseAuthDiagnostics(req));
 });
 
 app.post('/api/uploads/telemetry', (req, res) => {
@@ -636,6 +721,33 @@ app.post('/api/admin/login', (req, res) => {
   }
   const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '30d' });
   return res.json({ success: true, token });
+});
+
+app.post('/api/auth/supabase/exchange', async (req, res) => {
+  const { accessToken, projectId } = req.body || {};
+  if (!accessToken || !projectId) {
+    return res.status(400).json({ message: 'accessToken and projectId are required.' });
+  }
+  if (!supabaseAdmin) {
+    return res.status(500).json({
+      message: 'Supabase admin auth is not configured on the server.'
+    });
+  }
+
+  try {
+    const { data, error } = await supabaseAdmin.auth.getUser(String(accessToken));
+    if (error || !data?.user?.email) {
+      return res.status(401).json({ message: 'Invalid Supabase session.' });
+    }
+    if (!data.user.email_confirmed_at) {
+      return res.status(401).json({ message: 'Email is not verified yet.' });
+    }
+    const payload = await issueVerifiedAccessToken(projectId, data.user.email);
+    return res.json(payload);
+  } catch (err) {
+    console.error('Supabase exchange failed:', err);
+    return res.status(500).json({ message: 'Supabase verification exchange failed.' });
+  }
 });
 
 app.post('/api/auth/request-magic', async (req, res) => {
@@ -684,7 +796,10 @@ app.post('/api/auth/request-magic', async (req, res) => {
       });
     } else {
       if (process.env.NODE_ENV === 'production') {
-        return res.status(500).json({ message: 'Email delivery is not configured.' });
+        return res.status(500).json({
+          message:
+            'EMAIL DELIVERY IS NOT CONFIGURED. Configure Supabase Email/SMTP (Auth) or set RESEND_API_KEY and RESEND_FROM.'
+        });
       }
       console.log('[DEV] Magic link:', magicLink);
     }
@@ -724,30 +839,16 @@ app.post('/api/auth/verify-magic', async (req, res) => {
     }
 
     await query('DELETE FROM magic_links WHERE id = $1', [verificationId]);
-
-    const access = await getAccessRecord(record.project_id, record.email);
-    await query(
-      'UPDATE access_records SET verified = true, verified_at = NOW(), updated_at = NOW() WHERE id = $1',
-      [access.id]
-    );
-
-    const token = jwt.sign({ email: access.email }, JWT_SECRET, { expiresIn: '365d' });
+    const payload = await issueVerifiedAccessToken(record.project_id, record.email);
     if (IS_DEV) {
       console.log('[DEV] verify-magic success', {
         projectId: record.project_id,
-        email: access.email,
+        email: payload.email,
         verified: true
       });
     }
 
-    return res.json({
-      success: true,
-      token,
-      email: access.email,
-      projectId: access.project_id,
-      remaining: access.remaining,
-      unlocked: access.unlocked
-    });
+    return res.json(payload);
   } catch (err) {
     console.error('Verify magic failed:', err);
     return res.status(500).json({ message: 'Verification failed.' });
