@@ -89,6 +89,52 @@ const PublicTAPPage: React.FC = () => {
   }, [slug]);
 
   useEffect(() => {
+    if (!project?.slug || typeof window === 'undefined') return;
+
+    const isTapRoute = window.location.pathname.startsWith('/t/');
+    const albumPath = isTapRoute ? `/t/${project.slug}` : `/${project.slug}`;
+    const manifestUrl = new URL('/api/pwa/manifest', window.location.origin);
+    manifestUrl.searchParams.set('slug', project.slug);
+    manifestUrl.searchParams.set('path', albumPath);
+
+    let manifestLink = document.querySelector('link[rel="manifest"]') as HTMLLinkElement | null;
+    const createdManifestLink = !manifestLink;
+    const previousManifestHref = manifestLink?.getAttribute('href') || '/manifest.webmanifest';
+    if (!manifestLink) {
+      manifestLink = document.createElement('link');
+      manifestLink.setAttribute('rel', 'manifest');
+      document.head.appendChild(manifestLink);
+    }
+    manifestLink.setAttribute('href', `${manifestUrl.pathname}${manifestUrl.search}`);
+
+    const themeMeta = document.querySelector('meta[name="theme-color"]');
+    const previousTheme = themeMeta?.getAttribute('content') || '';
+    if (themeMeta) {
+      themeMeta.setAttribute('content', '#020617');
+    }
+
+    const appleTitleMeta = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+    const previousAppleTitle = appleTitleMeta?.getAttribute('content') || '';
+    if (appleTitleMeta) {
+      appleTitleMeta.setAttribute('content', String(project.title || 'TAP').trim().slice(0, 15) || 'TAP');
+    }
+
+    return () => {
+      if (createdManifestLink) {
+        manifestLink?.remove();
+      } else if (manifestLink) {
+        manifestLink.setAttribute('href', previousManifestHref);
+      }
+      if (themeMeta && previousTheme) {
+        themeMeta.setAttribute('content', previousTheme);
+      }
+      if (appleTitleMeta && previousAppleTitle) {
+        appleTitleMeta.setAttribute('content', previousAppleTitle);
+      }
+    };
+  }, [project?.slug, project?.title]);
+
+  useEffect(() => {
     const search = window.location.search || '';
     let params = new URLSearchParams(search);
     if ([...params.keys()].length === 0) {
@@ -584,7 +630,7 @@ const PublicTAPPage: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-screen bg-slate-950">
+      <div className="flex items-center justify-center tap-full-height bg-slate-950">
         <div className="w-8 h-8 border-4 border-green-500 border-t-transparent rounded-full animate-spin"></div>
       </div>
     );
@@ -592,7 +638,7 @@ const PublicTAPPage: React.FC = () => {
 
   if (!project) {
     return (
-      <div className="flex flex-col items-center justify-center h-screen bg-slate-950 px-6 text-center">
+      <div className="flex flex-col items-center justify-center tap-full-height bg-slate-950 px-6 text-center tap-safe-top tap-safe-bottom">
         <h1 className="text-2xl font-bold mb-2">TAP Not Found</h1>
         <p className="text-slate-400 italic">This album experience is currently private or does not exist.</p>
       </div>
@@ -601,8 +647,8 @@ const PublicTAPPage: React.FC = () => {
 
   if (!isUnlocked) {
     return (
-      <div className="w-full min-h-screen bg-slate-950 flex flex-col items-center justify-center px-8 text-center animate-in fade-in duration-700">
-        <div className="w-full max-w-md">
+      <div className="w-full tap-full-height bg-slate-950 flex flex-col items-center justify-center px-5 sm:px-8 text-center animate-in fade-in duration-700 tap-safe-top tap-safe-bottom">
+        <div className="w-full max-w-md rounded-[2rem] border border-slate-800/70 bg-slate-900/35 shadow-[0_24px_60px_rgba(0,0,0,0.5)] px-6 py-8 sm:p-8">
           <div className="mb-10 flex flex-col items-center">
             <div className="w-20 h-20 bg-green-500/10 rounded-[2rem] border border-green-500/20 flex items-center justify-center text-green-500 mb-8 shadow-2xl shadow-green-500/10">
               <ShieldAlert size={36} />
@@ -618,7 +664,7 @@ const PublicTAPPage: React.FC = () => {
 
           <button
             onClick={openModal}
-            className="w-full py-5 rounded-3xl font-black text-xs uppercase tracking-[0.3em] flex items-center justify-center gap-3 transition-all bg-green-500 text-black shadow-xl shadow-green-500/20 active:scale-95"
+            className="w-full min-h-[56px] px-4 rounded-3xl font-black text-xs uppercase tracking-[0.24em] flex items-center justify-center gap-3 transition-all bg-green-500 text-black shadow-xl shadow-green-500/20 active:scale-95 touch-manipulation"
           >
             <Mail size={18} />
             Continue with Email
@@ -634,15 +680,15 @@ const PublicTAPPage: React.FC = () => {
         </div>
 
         {showModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/90 backdrop-blur-md p-6">
-            <div className="w-full max-w-md bg-slate-900 rounded-[32px] border border-slate-800 p-8 text-left">
+          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/90 backdrop-blur-md p-0 sm:p-6">
+            <div className="w-full sm:max-w-md bg-slate-900 rounded-t-[30px] sm:rounded-[32px] border border-slate-800 p-6 sm:p-8 text-left max-h-[92dvh] overflow-y-auto tap-native-scroll tap-safe-bottom">
               <div className="flex items-center justify-between mb-6">
                 <h2 className="text-xl font-black">Verify Ownership</h2>
-                <button onClick={closeModal} className="text-slate-500 hover:text-white">×</button>
+                <button onClick={closeModal} className="w-10 h-10 flex items-center justify-center text-slate-500 hover:text-white bg-slate-800/70 rounded-full touch-manipulation">×</button>
               </div>
 
               {step === 'email' && (
-                <form onSubmit={handleRequestMagic} className="space-y-6">
+                <form onSubmit={handleRequestMagic} className="space-y-5">
                   <div>
                     <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Email</label>
                     <input
@@ -650,7 +696,7 @@ const PublicTAPPage: React.FC = () => {
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
                       placeholder="you@domain.com"
-                      className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 focus:outline-none focus:ring-1 focus:ring-green-500 text-white"
+                      className="w-full bg-slate-800/50 border border-slate-700 rounded-2xl px-4 py-4 text-base focus:outline-none focus:ring-1 focus:ring-green-500 text-white"
                       required
                     />
                   </div>
@@ -663,7 +709,7 @@ const PublicTAPPage: React.FC = () => {
                   <button
                     type="submit"
                     disabled={isSending}
-                    className="w-full py-4 rounded-2xl font-black text-xs uppercase tracking-[0.3em] flex items-center justify-center gap-3 transition-all bg-green-500 text-black shadow-xl shadow-green-500/20 active:scale-95"
+                    className="w-full min-h-[52px] px-4 rounded-2xl font-black text-xs uppercase tracking-[0.24em] flex items-center justify-center gap-3 transition-all bg-green-500 text-black shadow-xl shadow-green-500/20 active:scale-95 touch-manipulation"
                   >
                     {isSending ? <Loader2 size={18} className="animate-spin" /> : <Mail size={18} />}
                     Send Magic Link
@@ -672,7 +718,7 @@ const PublicTAPPage: React.FC = () => {
               )}
 
               {step === 'code' && (
-                <form onSubmit={handleVerifyMagic} className="space-y-6">
+                <form onSubmit={handleVerifyMagic} className="space-y-5">
                   <div>
                     <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Verification Code</label>
                     <input
@@ -680,7 +726,7 @@ const PublicTAPPage: React.FC = () => {
                       value={magicCode}
                       onChange={(e) => setMagicCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
                       placeholder="6-digit code"
-                      className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 focus:outline-none focus:ring-1 focus:ring-green-500 text-white tracking-[0.4em] text-center font-mono"
+                      className="w-full bg-slate-800/50 border border-slate-700 rounded-2xl px-4 py-4 text-base focus:outline-none focus:ring-1 focus:ring-green-500 text-white tracking-[0.34em] text-center font-mono"
                       required
                     />
                     <p className="mt-2 text-[10px] text-slate-500 font-bold uppercase tracking-widest">
@@ -703,7 +749,7 @@ const PublicTAPPage: React.FC = () => {
                   <button
                     type="submit"
                     disabled={isVerifying}
-                    className="w-full py-4 rounded-2xl font-black text-xs uppercase tracking-[0.3em] flex items-center justify-center gap-3 transition-all bg-green-500 text-black shadow-xl shadow-green-500/20 active:scale-95"
+                    className="w-full min-h-[52px] px-4 rounded-2xl font-black text-xs uppercase tracking-[0.24em] flex items-center justify-center gap-3 transition-all bg-green-500 text-black shadow-xl shadow-green-500/20 active:scale-95 touch-manipulation"
                   >
                     {isVerifying ? <Loader2 size={18} className="animate-spin" /> : <CheckCircle2 size={18} />}
                     Verify Email
@@ -712,7 +758,7 @@ const PublicTAPPage: React.FC = () => {
               )}
 
               {step === 'pin' && (
-                <form onSubmit={handleVerifyPin} className="space-y-6">
+                <form onSubmit={handleVerifyPin} className="space-y-5">
                   <div className="bg-slate-800/60 border border-slate-700 rounded-2xl p-4">
                     <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Your PIN</p>
                     <div className="flex items-center justify-between">
@@ -740,7 +786,7 @@ const PublicTAPPage: React.FC = () => {
                       value={pinInput}
                       onChange={(e) => setPinInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
                       placeholder="6-digit PIN"
-                      className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 focus:outline-none focus:ring-1 focus:ring-green-500 text-white tracking-[0.4em] text-center font-mono"
+                      className="w-full bg-slate-800/50 border border-slate-700 rounded-2xl px-4 py-4 text-base focus:outline-none focus:ring-1 focus:ring-green-500 text-white tracking-[0.34em] text-center font-mono"
                       required
                     />
                   </div>
@@ -758,7 +804,7 @@ const PublicTAPPage: React.FC = () => {
                       resetAuth();
                       setShowModal(false);
                     }}
-                    className="w-full py-3 rounded-xl font-black text-[10px] uppercase tracking-[0.3em] flex items-center justify-center transition-all bg-slate-800/60 text-slate-300 hover:bg-slate-800"
+                    className="w-full min-h-[48px] px-4 rounded-xl font-black text-[10px] uppercase tracking-[0.24em] flex items-center justify-center transition-all bg-slate-800/60 text-slate-300 hover:bg-slate-800 touch-manipulation"
                   >
                     Use Different Email
                   </button>
@@ -766,7 +812,7 @@ const PublicTAPPage: React.FC = () => {
                   <button
                     type="submit"
                     disabled={isUnlocking || pinInput.length < 6}
-                    className={`w-full py-4 rounded-2xl font-black text-xs uppercase tracking-[0.3em] flex items-center justify-center gap-3 transition-all ${
+                    className={`w-full min-h-[56px] px-4 rounded-2xl font-black text-xs uppercase tracking-[0.24em] flex items-center justify-center gap-3 transition-all touch-manipulation ${
                       isUnlocking || pinInput.length < 6
                         ? 'bg-slate-800 text-slate-600'
                         : 'bg-green-500 text-black shadow-xl shadow-green-500/20 active:scale-95'
@@ -785,8 +831,8 @@ const PublicTAPPage: React.FC = () => {
   }
 
   return (
-    <div className="w-full min-h-screen bg-slate-950 flex justify-center overflow-hidden">
-      <div className="w-full max-w-[480px] h-screen shadow-2xl overflow-hidden flex flex-col">
+    <div className="w-full tap-full-height bg-slate-950 flex justify-center overflow-hidden">
+      <div className="w-full max-w-[520px] tap-full-height overflow-hidden flex flex-col md:my-3 md:h-[calc(100dvh-1.5rem)] md:rounded-[2rem] md:border md:border-slate-800/70 md:shadow-2xl">
         <TAPRenderer project={project} tracks={tracks} isPreview={false} showCover={true} showMeta={true} showAllTracks={true} resolveAssetUrl={resolveAsset} />
       </div>
     </div>

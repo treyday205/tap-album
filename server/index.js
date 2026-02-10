@@ -83,6 +83,7 @@ const RESEND_FROM = process.env.RESEND_FROM;
 const MAGIC_TTL_MS = 15 * 60 * 1000;
 const MAX_PINS_PER_EMAIL = 1_000_000;
 const MAX_PIN_UNLOCKS_PER_PROJECT = 1_000_000;
+const PWA_APP_NAME = 'TAP Album';
 const IS_DEV = process.env.NODE_ENV !== 'production';
 const MAX_AUDIO_BYTES = 1024 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -860,6 +861,14 @@ const generateProjectSlug = () => {
     slug += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return slug;
+};
+const sanitizePwaPath = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '/';
+  if (!raw.startsWith('/')) return '/';
+  if (raw.startsWith('/api/')) return '/';
+  if (raw.includes('..')) return '/';
+  return raw;
 };
 const createDefaultProjectPayload = ({ ownerUserId, projectId, slug, title, artistName }) => {
   const now = new Date().toISOString();
@@ -1957,7 +1966,94 @@ app.get('/api/projects/:slug', async (req, res) => {
   }
 });
 
+app.get('/api/pwa/manifest', async (req, res) => {
+  const slug = String(req.query.slug || '').trim().toLowerCase();
+  const requestedPath = sanitizePwaPath(req.query.path);
+
+  let appName = PWA_APP_NAME;
+  let appShortName = 'TAP';
+  let appDescription = 'Live album experience';
+  let startPath = requestedPath !== '/' ? requestedPath : '/';
+
+  if (slug) {
+    try {
+      const projectResult = await query(
+        IS_DEV
+          ? 'SELECT title, artist_name, slug FROM projects WHERE slug = $1 ORDER BY updated_at DESC LIMIT 1'
+          : 'SELECT title, artist_name, slug FROM projects WHERE slug = $1 AND published = true LIMIT 1',
+        [slug]
+      );
+
+      if (projectResult.rows.length > 0) {
+        const row = projectResult.rows[0];
+        const title = String(row.title || '').trim();
+        const artistName = String(row.artist_name || '').trim();
+        if (title) {
+          appName = artistName ? `${title} - ${artistName}` : title;
+          appShortName = title.slice(0, 12) || 'TAP';
+          appDescription = artistName
+            ? `Listen to ${title} by ${artistName}`
+            : `Listen to ${title}`;
+        }
+        if (requestedPath === '/' && row.slug) {
+          startPath = `/${String(row.slug).trim()}`;
+        }
+      }
+    } catch (err) {
+      console.error('PWA manifest project lookup failed:', err?.message || err);
+    }
+  }
+
+  const manifest = {
+    id: startPath,
+    name: appName,
+    short_name: appShortName,
+    description: appDescription,
+    start_url: startPath,
+    scope: '/',
+    display: 'standalone',
+    display_override: ['fullscreen', 'standalone', 'minimal-ui'],
+    background_color: '#020617',
+    theme_color: '#020617',
+    orientation: 'portrait',
+    categories: ['music', 'entertainment'],
+    icons: [
+      {
+        src: '/icons/icon-192.png',
+        sizes: '192x192',
+        type: 'image/png',
+        purpose: 'any'
+      },
+      {
+        src: '/icons/icon-512.png',
+        sizes: '512x512',
+        type: 'image/png',
+        purpose: 'any'
+      },
+      {
+        src: '/icons/icon-maskable-512.png',
+        sizes: '512x512',
+        type: 'image/png',
+        purpose: 'maskable'
+      }
+    ]
+  };
+
+  res.set('Cache-Control', 'no-store');
+  res.type('application/manifest+json');
+  return res.send(JSON.stringify(manifest));
+});
+
 app.use('/assets', express.static(path.join(DIST_DIR, 'assets'), { fallthrough: false }));
+app.get('/sw.js', (req, res) => {
+  const swPath = path.join(DIST_DIR, 'sw.js');
+  if (!fs.existsSync(swPath)) {
+    return res.status(404).json({ message: 'Service worker not found.' });
+  }
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Service-Worker-Allowed', '/');
+  return res.sendFile(swPath);
+});
 app.use(express.static(DIST_DIR, { index: false }));
 
 app.get('/', (_req, res) => {

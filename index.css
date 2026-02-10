@@ -1,3 +1,70 @@
+:root {
+  --tap-safe-top: env(safe-area-inset-top, 0px);
+  --tap-safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  -webkit-tap-highlight-color: transparent;
+  text-size-adjust: 100%;
+}
+
+.tap-full-height {
+  min-height: 100dvh;
+}
+
+@supports not (height: 100dvh) {
+  .tap-full-height {
+    min-height: 100vh;
+  }
+}
+
+.tap-native-scroll {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+}
+
+.tap-safe-top {
+  padding-top: calc(var(--tap-safe-top) + 0.25rem);
+}
+
+.tap-safe-bottom {
+  padding-bottom: calc(var(--tap-safe-bottom) + 0.5rem);
+}
+
+.tap-progress {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(71, 85, 105, 0.8);
+}
+
+.tap-progress::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: #22c55e;
+  border: 2px solid #0f172a;
+}
+
+.tap-progress::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: #22c55e;
+  border: 2px solid #0f172a;
+}
+
 /* Tracklist title truncation: single-line on mobile, 2-line clamp on larger screens. */
 .track-title {
   white-space: nowrap;

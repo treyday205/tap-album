@@ -4,6 +4,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="TAP">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="format-detection" content="telephone=no">
   
   <!-- Primary Meta Tags -->
   <title>TAP Album | The Digital-Physical Music Platform</title>
@@ -26,8 +31,10 @@
   <meta property="twitter:image" content="https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&q=80&w=1200&h=630">
 
   <!-- Manifest & Icons -->
-  <link rel="manifest" href="manifest.json">
-  <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/3659/3659899.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" sizes="180x180" href="/icons/icon-180.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+  <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png">
 
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -40,7 +47,9 @@
       background-color: #020617; /* slate-950 */
       color: #f8fafc;
       -webkit-tap-highlight-color: transparent;
-      overscroll-behavior-y: none;
+      overscroll-behavior-y: contain;
+      touch-action: manipulation;
+      -webkit-font-smoothing: antialiased;
     }
     
     /* Hide scrollbar for Chrome, Safari and Opera */
