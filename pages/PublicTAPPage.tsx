@@ -881,19 +881,7 @@ const PublicTAPPage: React.FC = () => {
 
   return (
     <div className="w-full tap-full-height bg-slate-950 flex justify-center overflow-hidden">
-      <div className="relative w-full max-w-[520px] tap-full-height overflow-hidden flex flex-col md:my-3 md:h-[calc(100dvh-1.5rem)] md:rounded-[2rem] md:border md:border-slate-800/70 md:shadow-2xl">
-        <div className="absolute z-30 top-4 right-4">
-          <button
-            type="button"
-            onClick={() => {
-              resetAuth(project?.projectId || routeProjectId);
-              setShowModal(true);
-            }}
-            className="min-h-[40px] px-3 rounded-full border border-slate-700/80 bg-slate-900/75 text-[10px] font-black uppercase tracking-[0.18em] text-slate-200 backdrop-blur-md touch-manipulation"
-          >
-            Use Different Email
-          </button>
-        </div>
+      <div className="w-full max-w-[520px] tap-full-height overflow-hidden flex flex-col md:my-3 md:h-[calc(100dvh-1.5rem)] md:rounded-[2rem] md:border md:border-slate-800/70 md:shadow-2xl">
         <TAPRenderer project={project} tracks={tracks} isPreview={false} showCover={true} showMeta={true} showAllTracks={true} resolveAssetUrl={resolveAsset} />
       </div>
     </div>
