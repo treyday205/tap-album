@@ -19,6 +19,18 @@ UPDATE access_records
 SET remaining = 1000000
 WHERE remaining < 1000000;
 
+DELETE FROM access_records a
+USING access_records b
+WHERE a.project_id = b.project_id
+  AND a.email = b.email
+  AND (
+    a.updated_at < b.updated_at
+    OR (a.updated_at = b.updated_at AND a.id < b.id)
+  );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_access_records_project_email_unique
+  ON access_records (project_id, email);
+
 CREATE TABLE IF NOT EXISTS magic_links (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,

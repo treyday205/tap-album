@@ -1,5 +1,5 @@
 ﻿import React, { useState, useEffect, useRef } from 'react';
-import { useParams } from 'react-router-dom';
+import { useLocation, useParams } from 'react-router-dom';
 import { StorageService } from '../services/storage';
 import { Project, Track, EventType } from '../types';
 import TAPRenderer from '../components/TAPRenderer';
@@ -17,9 +17,13 @@ import {
 const AUTH_TOKEN_KEY = 'tap_auth_token';
 const AUTH_EMAIL_KEY = 'tap_auth_email';
 const IS_DEV = import.meta.env.DEV;
+const scopedAuthTokenKey = (projectId: string) => `${AUTH_TOKEN_KEY}_${projectId}`;
+const scopedAuthEmailKey = (projectId: string) => `${AUTH_EMAIL_KEY}_${projectId}`;
+const normalizeProjectId = (value?: string | null) => String(value || '').trim();
 
 const PublicTAPPage: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
+  const location = useLocation();
   const [project, setProject] = useState<Project | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(true);
@@ -37,7 +41,7 @@ const PublicTAPPage: React.FC = () => {
   const [step, setStep] = useState<'email' | 'code' | 'pin'>('email');
   const [autoVerifyPayload, setAutoVerifyPayload] = useState<{ verificationId: string; code: string } | null>(null);
   const [routeProjectId, setRouteProjectId] = useState<string | null>(null);
-  const autoVerifyRef = useRef(false);
+  const autoVerifyRef = useRef<string | null>(null);
   const supabaseExchangeInFlightRef = useRef<Promise<string | null> | null>(null);
   const lastSupabaseAccessTokenRef = useRef<string | null>(null);
   const cleanedSupabaseUrlRef = useRef(false);
@@ -47,6 +51,44 @@ const PublicTAPPage: React.FC = () => {
   const [isIssuing, setIsIssuing] = useState(false);
   const [isUnlocking, setIsUnlocking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const getAuthToken = (projectId?: string | null) => {
+    const normalizedProjectId = normalizeProjectId(projectId);
+    if (normalizedProjectId) {
+      const scoped = localStorage.getItem(scopedAuthTokenKey(normalizedProjectId));
+      if (scoped) return scoped;
+    }
+    return localStorage.getItem(AUTH_TOKEN_KEY);
+  };
+
+  const getAuthEmail = (projectId?: string | null) => {
+    const normalizedProjectId = normalizeProjectId(projectId);
+    if (normalizedProjectId) {
+      const scoped = localStorage.getItem(scopedAuthEmailKey(normalizedProjectId));
+      if (scoped) return scoped;
+    }
+    return localStorage.getItem(AUTH_EMAIL_KEY);
+  };
+
+  const setAuthPayload = (projectId: string | null | undefined, token: string, authEmail: string) => {
+    const normalizedProjectId = normalizeProjectId(projectId);
+    if (normalizedProjectId) {
+      localStorage.setItem(scopedAuthTokenKey(normalizedProjectId), token);
+      localStorage.setItem(scopedAuthEmailKey(normalizedProjectId), authEmail);
+    }
+    localStorage.setItem(AUTH_TOKEN_KEY, token);
+    localStorage.setItem(AUTH_EMAIL_KEY, authEmail);
+  };
+
+  const clearAuthPayload = (projectId?: string | null) => {
+    const normalizedProjectId = normalizeProjectId(projectId);
+    if (normalizedProjectId) {
+      localStorage.removeItem(scopedAuthTokenKey(normalizedProjectId));
+      localStorage.removeItem(scopedAuthEmailKey(normalizedProjectId));
+    }
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+    localStorage.removeItem(AUTH_EMAIL_KEY);
+  };
 
   useEffect(() => {
     if (!slug) return;
@@ -135,10 +177,10 @@ const PublicTAPPage: React.FC = () => {
   }, [project?.slug, project?.title]);
 
   useEffect(() => {
-    const search = window.location.search || '';
+    const search = location.search || '';
     let params = new URLSearchParams(search);
     if ([...params.keys()].length === 0) {
-      const hash = window.location.hash || '';
+      const hash = location.hash || '';
       const queryIndex = hash.indexOf('?');
       if (queryIndex !== -1) {
         const hashSearch = hash.slice(queryIndex + 1);
@@ -162,7 +204,7 @@ const PublicTAPPage: React.FC = () => {
     if (hasSupabaseAuthUrlState()) {
       setShowModal(true);
     }
-  }, []);
+  }, [location.search, location.hash]);
 
   useEffect(() => {
     let canceled = false;
@@ -192,8 +234,7 @@ const PublicTAPPage: React.FC = () => {
         }
       } catch (err) {
         if (canceled) return;
-        localStorage.removeItem(AUTH_TOKEN_KEY);
-        localStorage.removeItem(AUTH_EMAIL_KEY);
+        clearAuthPayload(project.projectId);
         lastSupabaseAccessTokenRef.current = null;
         setIsUnlocked(false);
       }
@@ -211,7 +252,7 @@ const PublicTAPPage: React.FC = () => {
     if (!project) return;
     const missing = refs.filter((ref) => isAssetRef(ref) && !assetUrls[ref]);
     if (missing.length === 0) return;
-    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    const token = getAuthToken(project.projectId);
     if (!token && (project.emailGateEnabled ?? true)) return;
     try {
       const response = await Api.signAssets(project.projectId, missing, token || undefined);
@@ -271,9 +312,9 @@ const PublicTAPPage: React.FC = () => {
     setStep('email');
   };
 
-  const resetAuth = () => {
-    localStorage.removeItem(AUTH_TOKEN_KEY);
-    localStorage.removeItem(AUTH_EMAIL_KEY);
+  const resetAuth = (projectIdOverride?: string | null) => {
+    const effectiveProjectId = normalizeProjectId(projectIdOverride || project?.projectId || routeProjectId);
+    clearAuthPayload(effectiveProjectId || null);
     lastSupabaseAccessTokenRef.current = null;
     supabaseExchangeInFlightRef.current = null;
     if (supabaseAuthClient) {
@@ -288,14 +329,14 @@ const PublicTAPPage: React.FC = () => {
 
   const persistAuthPayload = (payload: any) => {
     if (!payload?.token || !payload?.email) return;
-    localStorage.setItem(AUTH_TOKEN_KEY, payload.token);
-    localStorage.setItem(AUTH_EMAIL_KEY, payload.email);
+    const effectiveProjectId = normalizeProjectId(payload?.projectId || project?.projectId || routeProjectId);
+    setAuthPayload(effectiveProjectId || null, payload.token, payload.email);
     setRemaining(payload.remaining ?? null);
   };
 
   const exchangeSupabaseSession = async (projectId: string, accessToken: string): Promise<string | null> => {
     if (!projectId || !accessToken) return null;
-    const existingToken = localStorage.getItem(AUTH_TOKEN_KEY);
+    const existingToken = getAuthToken(projectId);
     if (lastSupabaseAccessTokenRef.current === accessToken && existingToken) {
       return existingToken;
     }
@@ -306,7 +347,7 @@ const PublicTAPPage: React.FC = () => {
   };
 
   const ensureAppToken = async (projectId: string): Promise<string | null> => {
-    const existingToken = localStorage.getItem(AUTH_TOKEN_KEY);
+    const existingToken = getAuthToken(projectId);
     if (existingToken) return existingToken;
     if (!projectId || !isSupabaseAuthEnabled || !supabaseAuthClient) return null;
     if (supabaseExchangeInFlightRef.current) {
@@ -339,7 +380,7 @@ const PublicTAPPage: React.FC = () => {
       return;
     }
 
-    let token = localStorage.getItem(AUTH_TOKEN_KEY);
+    let token = getAuthToken(effectiveProjectId);
     if (!token) {
       token = await ensureAppToken(effectiveProjectId);
     }
@@ -355,11 +396,11 @@ const PublicTAPPage: React.FC = () => {
         setStep('pin');
         await handleIssuePin(token, effectiveProjectId);
       } else {
-        resetAuth();
+        resetAuth(effectiveProjectId);
         setStep('email');
       }
     } catch {
-      resetAuth();
+      resetAuth(effectiveProjectId);
       setStep('email');
     } finally {
       setIsIssuing(false);
@@ -389,6 +430,11 @@ const PublicTAPPage: React.FC = () => {
 
     try {
       setEmail(normalizedEmail);
+      const currentEmail = String(getAuthEmail(project.projectId) || '').trim().toLowerCase();
+      if (currentEmail && currentEmail !== normalizedEmail) {
+        clearAuthPayload(project.projectId);
+        lastSupabaseAccessTokenRef.current = null;
+      }
       if (isSupabaseAuthEnabled && supabaseAuthClient) {
         const redirectTo = buildSupabaseEmailRedirectUrl(slugValue, project.projectId);
         const { error: otpError } = await supabaseAuthClient.auth.signInWithOtp({
@@ -506,11 +552,14 @@ const PublicTAPPage: React.FC = () => {
   };
 
   useEffect(() => {
-    if (!autoVerifyPayload || !project || autoVerifyRef.current) return;
-    autoVerifyRef.current = true;
+    if (!autoVerifyPayload || !project) return;
+    const verifyKey = `${project.projectId}:${autoVerifyPayload.verificationId}:${autoVerifyPayload.code}`;
+    if (autoVerifyRef.current === verifyKey) return;
+    autoVerifyRef.current = verifyKey;
     performVerifyMagic(autoVerifyPayload.verificationId, autoVerifyPayload.code).finally(() => {
       const cleanUrl = window.location.href.split('?')[0];
       window.history.replaceState({}, document.title, cleanUrl);
+      setAutoVerifyPayload(null);
     });
   }, [autoVerifyPayload, project]);
 
@@ -832,7 +881,19 @@ const PublicTAPPage: React.FC = () => {
 
   return (
     <div className="w-full tap-full-height bg-slate-950 flex justify-center overflow-hidden">
-      <div className="w-full max-w-[520px] tap-full-height overflow-hidden flex flex-col md:my-3 md:h-[calc(100dvh-1.5rem)] md:rounded-[2rem] md:border md:border-slate-800/70 md:shadow-2xl">
+      <div className="relative w-full max-w-[520px] tap-full-height overflow-hidden flex flex-col md:my-3 md:h-[calc(100dvh-1.5rem)] md:rounded-[2rem] md:border md:border-slate-800/70 md:shadow-2xl">
+        <div className="absolute z-30 top-4 right-4">
+          <button
+            type="button"
+            onClick={() => {
+              resetAuth(project?.projectId || routeProjectId);
+              setShowModal(true);
+            }}
+            className="min-h-[40px] px-3 rounded-full border border-slate-700/80 bg-slate-900/75 text-[10px] font-black uppercase tracking-[0.18em] text-slate-200 backdrop-blur-md touch-manipulation"
+          >
+            Use Different Email
+          </button>
+        </div>
         <TAPRenderer project={project} tracks={tracks} isPreview={false} showCover={true} showMeta={true} showAllTracks={true} resolveAssetUrl={resolveAsset} />
       </div>
     </div>
