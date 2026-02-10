@@ -4,13 +4,20 @@ CREATE TABLE IF NOT EXISTS access_records (
   email TEXT NOT NULL,
   verified BOOLEAN NOT NULL DEFAULT false,
   unlocked BOOLEAN NOT NULL DEFAULT false,
-  remaining INTEGER NOT NULL DEFAULT 5,
+  remaining INTEGER NOT NULL DEFAULT 1000000,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   verified_at TIMESTAMPTZ,
   unlocked_at TIMESTAMPTZ,
   UNIQUE (project_id, email)
 );
+
+ALTER TABLE access_records
+  ALTER COLUMN remaining SET DEFAULT 1000000;
+
+UPDATE access_records
+SET remaining = 1000000
+WHERE remaining < 1000000;
 
 CREATE TABLE IF NOT EXISTS magic_links (
   id TEXT PRIMARY KEY,

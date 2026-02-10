@@ -81,7 +81,7 @@ const DATABASE_SSL = process.env.DATABASE_SSL === 'true';
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const RESEND_FROM = process.env.RESEND_FROM;
 const MAGIC_TTL_MS = 15 * 60 * 1000;
-const MAX_PINS_PER_EMAIL = 5;
+const MAX_PINS_PER_EMAIL = 1_000_000;
 const IS_DEV = process.env.NODE_ENV !== 'production';
 const MAX_AUDIO_BYTES = 1024 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -659,6 +659,22 @@ const query = (text, params, client) => {
   return runner.query(text, params);
 };
 
+const ensureAccessRemaining = async (access, client) => {
+  if (!access) return access;
+  const currentRemaining = Number(access.remaining);
+  if (Number.isFinite(currentRemaining) && currentRemaining >= MAX_PINS_PER_EMAIL) {
+    return access;
+  }
+
+  const updated = await query(
+    'UPDATE access_records SET remaining = $2, updated_at = NOW() WHERE id = $1 RETURNING *',
+    [access.id, MAX_PINS_PER_EMAIL],
+    client
+  );
+
+  return updated.rows[0] || { ...access, remaining: MAX_PINS_PER_EMAIL };
+};
+
 const getAccessRecord = async (projectId, email, client) => {
   const normalized = normalizeEmail(email);
   const existing = await query(
@@ -668,7 +684,7 @@ const getAccessRecord = async (projectId, email, client) => {
   );
 
   if (existing.rows.length > 0) {
-    return existing.rows[0];
+    return ensureAccessRemaining(existing.rows[0], client);
   }
 
   const id = crypto.randomUUID();
@@ -1227,6 +1243,7 @@ app.post('/api/pins/issue', auth, async (req, res) => {
         [crypto.randomUUID(), projectId, normalizeEmail(req.user.email), MAX_PINS_PER_EMAIL]
       )).rows[0];
     }
+    access = await ensureAccessRemaining(access, client);
 
     if (!access.verified) {
       await client.query('ROLLBACK');
@@ -1284,11 +1301,12 @@ app.post('/api/pins/verify', auth, async (req, res) => {
       [projectId, normalizeEmail(req.user.email)]
     );
 
-    const access = accessRow.rows[0];
+    let access = accessRow.rows[0];
     if (!access || !access.verified) {
       await client.query('ROLLBACK');
       return res.status(401).json({ message: 'Email not verified.' });
     }
+    access = await ensureAccessRemaining(access, client);
     if (access.unlocked) {
       await client.query('ROLLBACK');
       if (IS_DEV) {

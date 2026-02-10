@@ -612,7 +612,7 @@ const PublicTAPPage: React.FC = () => {
               Verify your email to unlock this album.
             </p>
             <p className="text-[10px] text-slate-600 font-bold uppercase tracking-[0.2em] mt-4">
-              {remaining !== null ? `Remaining PIN uses: ${remaining}` : 'Up to 5 PIN uses per email'}
+              {remaining !== null ? `Remaining PIN uses: ${remaining}` : 'Up to 1,000,000 PIN uses per email'}
             </p>
           </div>
 
@@ -729,7 +729,7 @@ const PublicTAPPage: React.FC = () => {
                       </button>
                     </div>
                     <p className="mt-2 text-[10px] text-slate-600 font-bold uppercase tracking-[0.2em]">
-                      {remaining !== null ? `Remaining PIN uses: ${remaining}` : 'Up to 5 PIN uses per email'}
+                      {remaining !== null ? `Remaining PIN uses: ${remaining}` : 'Up to 1,000,000 PIN uses per email'}
                     </p>
                   </div>
 

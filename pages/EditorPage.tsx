@@ -832,7 +832,7 @@ const EditorPage: React.FC = () => {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/50">
                       <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">PIN Allowance</p>
-                      <p className="text-sm font-bold text-slate-100">5 uses per email</p>
+                      <p className="text-sm font-bold text-slate-100">1,000,000 uses per email</p>
                       <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-2">
                         Count decreases only after a successful PIN unlock.
                       </p>
