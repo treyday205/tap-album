@@ -166,6 +166,16 @@ export const Api = {
         : undefined
     }),
 
+  getProjectSecurityStats: (projectId: string, token?: string) =>
+    request(`/api/projects/${encodeURIComponent(projectId)}/security-stats`, {
+      method: 'GET',
+      headers: token
+        ? {
+            Authorization: `Bearer ${token}`
+          }
+        : undefined
+    }),
+
   getProjectCoverUrl: (projectId: string, token?: string) =>
     request(`/api/projects/${encodeURIComponent(projectId)}/cover-url`, {
       method: 'GET',

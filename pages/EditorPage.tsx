@@ -18,6 +18,7 @@ import { collectBankRefs, resolveBankUrls, saveBankAsset } from '../services/ass
 
 const EditorPage: React.FC = () => {
   const MAX_TRACKS = 24;
+  const DEFAULT_SECURITY_LIMIT = 1_000_000;
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
   
@@ -57,8 +58,54 @@ const EditorPage: React.FC = () => {
   } | null>(null);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<string | null>(null);
+  const [projectSecurityStats, setProjectSecurityStats] = useState<{
+    pinUnlockUsed: number;
+    pinUnlockRemaining: number;
+    pinUnlockLimit: number;
+    pinActiveUsed: number;
+    pinActiveRemaining: number;
+    pinActiveLimit: number;
+  } | null>(null);
+  const [projectSecurityLoading, setProjectSecurityLoading] = useState(false);
+  const [projectSecurityError, setProjectSecurityError] = useState<string | null>(null);
   const [syncTick, setSyncTick] = useState(0);
   const syncTimeoutRef = useRef<number | null>(null);
+
+  const toSafeNonNegativeNumber = (value: unknown, fallback = 0) => {
+    const normalized = Number(value);
+    if (!Number.isFinite(normalized) || normalized < 0) {
+      return fallback;
+    }
+    return Math.floor(normalized);
+  };
+
+  const fallbackProjectSecurityStats = project
+    ? (() => {
+        const pinUnlockLimit = toSafeNonNegativeNumber(project.pinUnlockLimit, DEFAULT_SECURITY_LIMIT);
+        const pinUnlockUsed = toSafeNonNegativeNumber(project.pinUnlockCount, 0);
+        const pinUnlockRemainingRaw = project.pinUnlockRemaining;
+        const pinUnlockRemaining = Number.isFinite(Number(pinUnlockRemainingRaw))
+          ? toSafeNonNegativeNumber(pinUnlockRemainingRaw, Math.max(0, pinUnlockLimit - pinUnlockUsed))
+          : Math.max(0, pinUnlockLimit - pinUnlockUsed);
+        const pinActiveLimit = toSafeNonNegativeNumber(project.pinActiveLimit, DEFAULT_SECURITY_LIMIT);
+        const pinActiveUsed = toSafeNonNegativeNumber(project.pinActiveCount, 0);
+        const pinActiveRemainingRaw = project.pinActiveRemaining;
+        const pinActiveRemaining = Number.isFinite(Number(pinActiveRemainingRaw))
+          ? toSafeNonNegativeNumber(pinActiveRemainingRaw, Math.max(0, pinActiveLimit - pinActiveUsed))
+          : Math.max(0, pinActiveLimit - pinActiveUsed);
+
+        return {
+          pinUnlockUsed,
+          pinUnlockRemaining,
+          pinUnlockLimit,
+          pinActiveUsed,
+          pinActiveRemaining,
+          pinActiveLimit
+        };
+      })()
+    : null;
+
+  const effectiveProjectSecurityStats = projectSecurityStats || fallbackProjectSecurityStats;
 
   useEffect(() => {
     if (projectId) {
@@ -75,6 +122,35 @@ const EditorPage: React.FC = () => {
 
   useEffect(() => {
     if (activeTab !== 'security' || !project) return;
+    const adminToken = localStorage.getItem('tap_admin_token') || undefined;
+    if (!adminToken && !import.meta.env.DEV) {
+      setProjectSecurityError('Admin token required to load album security stats.');
+      setProjectSecurityStats(null);
+      return;
+    }
+
+    setProjectSecurityLoading(true);
+    setProjectSecurityError(null);
+    Api.getProjectSecurityStats(project.projectId, adminToken)
+      .then((stats) => {
+        setProjectSecurityStats({
+          pinUnlockUsed: toSafeNonNegativeNumber(stats?.pinUnlockUsed, 0),
+          pinUnlockRemaining: toSafeNonNegativeNumber(stats?.pinUnlockRemaining, DEFAULT_SECURITY_LIMIT),
+          pinUnlockLimit: toSafeNonNegativeNumber(stats?.pinUnlockLimit, DEFAULT_SECURITY_LIMIT),
+          pinActiveUsed: toSafeNonNegativeNumber(stats?.pinActiveUsed, 0),
+          pinActiveRemaining: toSafeNonNegativeNumber(stats?.pinActiveRemaining, DEFAULT_SECURITY_LIMIT),
+          pinActiveLimit: toSafeNonNegativeNumber(stats?.pinActiveLimit, DEFAULT_SECURITY_LIMIT)
+        });
+      })
+      .catch((err) => {
+        setProjectSecurityStats(null);
+        setProjectSecurityError(err.message || 'Unable to load album security stats.');
+      })
+      .finally(() => setProjectSecurityLoading(false));
+  }, [activeTab, project?.projectId, syncTick]);
+
+  useEffect(() => {
+    if (activeTab !== 'security' || !project) return;
     const token = localStorage.getItem('tap_auth_token');
     if (!token) {
       setAccessStatus(null);
@@ -88,7 +164,7 @@ const EditorPage: React.FC = () => {
       .then((status) => setAccessStatus(status))
       .catch((err) => setAccessError(err.message || 'Unable to load access status.'))
       .finally(() => setAccessLoading(false));
-  }, [activeTab, project]);
+  }, [activeTab, project?.projectId, syncTick]);
 
   const resolveAsset = (value: string) => resolveAssetUrl(value, assetUrls);
 
@@ -866,6 +942,59 @@ const EditorPage: React.FC = () => {
                 </section>
 
                 <section className="p-6 bg-slate-900/40 rounded-3xl border border-slate-800/50">
+                  <div className="flex items-center justify-between mb-4">
+                    <h4 className="text-xs font-black uppercase tracking-widest text-green-500">Album Security Stats</h4>
+                    {projectSecurityLoading && <Loader2 size={16} className="animate-spin text-slate-400" />}
+                  </div>
+
+                  {projectSecurityError && (
+                    <div className="flex items-center gap-2 text-red-400 text-[10px] font-black uppercase tracking-widest mb-3">
+                      <AlertTriangle size={14} />
+                      {projectSecurityError}
+                    </div>
+                  )}
+
+                  {effectiveProjectSecurityStats ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
+                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album Unlocks Used</p>
+                        <p className="text-sm font-bold text-white">
+                          {effectiveProjectSecurityStats.pinUnlockUsed.toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
+                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album Unlocks Remaining</p>
+                        <p className="text-sm font-bold text-white">
+                          {effectiveProjectSecurityStats.pinUnlockRemaining.toLocaleString()}
+                        </p>
+                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-2">
+                          Limit: {effectiveProjectSecurityStats.pinUnlockLimit.toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
+                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album Active PINs Used</p>
+                        <p className="text-sm font-bold text-white">
+                          {effectiveProjectSecurityStats.pinActiveUsed.toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
+                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album Active PINs Remaining</p>
+                        <p className="text-sm font-bold text-white">
+                          {effectiveProjectSecurityStats.pinActiveRemaining.toLocaleString()}
+                        </p>
+                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-2">
+                          Limit: {effectiveProjectSecurityStats.pinActiveLimit.toLocaleString()}
+                        </p>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+                      Album security stats are unavailable for this project.
+                    </p>
+                  )}
+                </section>
+
+                <section className="p-6 bg-slate-900/40 rounded-3xl border border-slate-800/50">
                   <h4 className="text-xs font-black uppercase tracking-widest text-green-500 mb-4">Current Email Status</h4>
                   {!localStorage.getItem('tap_auth_token') && (
                     <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">
@@ -912,50 +1041,6 @@ const EditorPage: React.FC = () => {
                             <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Active PIN</p>
                             <p className={`text-sm font-bold ${accessStatus.hasActivePin ? 'text-green-400' : 'text-slate-400'}`}>
                               {accessStatus.hasActivePin ? 'Issued' : 'None'}
-                            </p>
-                          </div>
-                          <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
-                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album Unlocks Used</p>
-                            <p className="text-sm font-bold text-white">
-                              {typeof accessStatus.projectUnlocksUsed === 'number'
-                                ? accessStatus.projectUnlocksUsed.toLocaleString()
-                                : 'N/A'}
-                            </p>
-                          </div>
-                          <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
-                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album Unlocks Remaining</p>
-                            <p className="text-sm font-bold text-white">
-                              {typeof accessStatus.projectUnlocksRemaining === 'number'
-                                ? accessStatus.projectUnlocksRemaining.toLocaleString()
-                                : 'N/A'}
-                            </p>
-                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-2">
-                              Limit:{' '}
-                              {typeof accessStatus.projectUnlocksLimit === 'number'
-                                ? accessStatus.projectUnlocksLimit.toLocaleString()
-                                : '1,000,000'}
-                            </p>
-                          </div>
-                          <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
-                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album Active PINs Used</p>
-                            <p className="text-sm font-bold text-white">
-                              {typeof accessStatus.projectActivePinsUsed === 'number'
-                                ? accessStatus.projectActivePinsUsed.toLocaleString()
-                                : 'N/A'}
-                            </p>
-                          </div>
-                          <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
-                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album Active PINs Remaining</p>
-                            <p className="text-sm font-bold text-white">
-                              {typeof accessStatus.projectActivePinsRemaining === 'number'
-                                ? accessStatus.projectActivePinsRemaining.toLocaleString()
-                                : 'N/A'}
-                            </p>
-                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-2">
-                              Limit:{' '}
-                              {typeof accessStatus.projectActivePinsLimit === 'number'
-                                ? accessStatus.projectActivePinsLimit.toLocaleString()
-                                : '1,000,000'}
                             </p>
                           </div>
                         </div>

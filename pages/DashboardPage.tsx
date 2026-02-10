@@ -234,10 +234,6 @@ const DashboardPage: React.FC = () => {
 
   const handleCreateNew = async () => {
     if (isCreatingProject) return;
-    if (projects.length > 0) {
-      navigate(`/dashboard/edit/${projects[0].projectId}`);
-      return;
-    }
     setIsCreatingProject(true);
     try {
       const token = getAdminToken();
@@ -308,27 +304,42 @@ const DashboardPage: React.FC = () => {
             <p className="text-slate-400">Secure distribution for your music.</p>
           </div>
         </div>
+      </header>
+
+      {projects.length === 0 ? (
+        <div className="rounded-3xl border border-slate-800 bg-slate-900/40 p-10 text-center">
+          <h2 className="text-xl font-black text-white">No albums yet</h2>
+          <p className="mt-2 text-sm text-slate-400">Create your first album to start publishing secure TAP links.</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {projects.map((project) => (
+            <AlbumCard
+              key={project.projectId}
+              project={project}
+              coverSrc={resolveCoverSrc(project)}
+              hasCoverReference={hasCoverReference(project)}
+              onRetryCoverUrl={retryCoverUrl}
+              onDelete={handleDelete}
+            />
+          ))}
+        </div>
+      )}
+
+      <div className="mt-10 flex flex-col items-center justify-center gap-2">
+        {projects.length > 0 && (
+          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">
+            Add another album
+          </p>
+        )}
         <button
           onClick={handleCreateNew}
           disabled={isCreatingProject}
           className="flex items-center justify-center gap-2 bg-green-500 hover:bg-green-400 disabled:bg-green-500/70 text-black font-bold py-3 px-6 rounded-full transition-all shadow-lg shadow-green-500/20 disabled:cursor-wait"
         >
           {isCreatingProject ? <Loader2 size={20} className="animate-spin" /> : <Plus size={20} />}
-          {isCreatingProject ? 'Creating...' : 'Create Private TAP'}
+          {isCreatingProject ? 'Creating...' : 'Create Album'}
         </button>
-      </header>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {projects.map((project) => (
-          <AlbumCard
-            key={project.projectId}
-            project={project}
-            coverSrc={resolveCoverSrc(project)}
-            hasCoverReference={hasCoverReference(project)}
-            onRetryCoverUrl={retryCoverUrl}
-            onDelete={handleDelete}
-          />
-        ))}
       </div>
     </div>
   );
