@@ -130,7 +130,6 @@ export const Api = {
 
   createProject: (
     options?: {
-      forceNew?: boolean;
       ownerUserId?: string;
       title?: string;
       artistName?: string;

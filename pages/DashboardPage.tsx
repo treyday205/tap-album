@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Loader2, LogOut, Plus, ShieldCheck } from 'lucide-react';
+import { Loader2, LogOut, Plus } from 'lucide-react';
 import AlbumCard from '../components/AlbumCard';
 import { StorageService } from '../services/storage';
 import { Api } from '../services/api';
@@ -37,49 +37,11 @@ const hasCoverReference = (project: Project) => {
   if (!cover) return false;
   return !isLegacyDefaultCover(cover);
 };
-const CreateAlbumPlaceholderCard: React.FC<{ onCreate: () => void; loading?: boolean }> = ({
-  onCreate,
-  loading = false
-}) => (
-  <button
-    type="button"
-    onClick={onCreate}
-    disabled={loading}
-    className="group relative bg-slate-900/50 border-2 border-dashed border-slate-800 hover:border-green-500 rounded-3xl overflow-hidden transition-all text-left disabled:cursor-wait disabled:opacity-80"
-  >
-    <div className="aspect-square w-full relative overflow-hidden">
-      <div className="absolute inset-0 bg-gradient-to-br from-slate-900 to-slate-800 flex flex-col items-center justify-center text-slate-500">
-        {loading ? <Loader2 size={30} className="animate-spin text-slate-500" /> : <ShieldCheck size={30} />}
-        <p className="mt-3 text-[10px] font-black uppercase tracking-widest text-slate-600">No Cover</p>
-      </div>
-      <div className="absolute top-4 right-4 flex gap-2">
-        <span className="text-[10px] font-black px-2 py-1 rounded border uppercase bg-slate-800 text-slate-300 border-slate-700">
-          Draft
-        </span>
-      </div>
-    </div>
-    <div className="p-6">
-      <h3 className="text-xl font-bold mb-1 truncate text-white">
-        {loading ? 'Loading Albums...' : 'Create New Album'}
-      </h3>
-      <p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest mb-6 flex items-center gap-1 opacity-50">
-        <Plus size={10} />
-        UI Placeholder
-      </p>
-      <div className="flex items-center justify-center gap-2 bg-green-500 hover:bg-green-400 text-black font-bold py-2.5 rounded-xl transition-colors">
-        <Plus size={14} />
-        Create Private TAP
-      </div>
-    </div>
-  </button>
-);
-
 const DashboardPage: React.FC = () => {
   const navigate = useNavigate();
   const [user, setUser] = useState<User | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [assetUrls, setAssetUrls] = useState<Record<string, string>>({});
-  const [projectsLoading, setProjectsLoading] = useState(true);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
 
@@ -140,8 +102,6 @@ const DashboardPage: React.FC = () => {
         if (import.meta.env.DEV) {
           console.warn('[DEV] projects hydrate failed', err);
         }
-      } finally {
-        setProjectsLoading(false);
       }
     };
 
@@ -274,6 +234,10 @@ const DashboardPage: React.FC = () => {
 
   const handleCreateNew = async () => {
     if (isCreatingProject) return;
+    if (projects.length > 0) {
+      navigate(`/dashboard/edit/${projects[0].projectId}`);
+      return;
+    }
     setIsCreatingProject(true);
     try {
       const token = getAdminToken();
@@ -365,10 +329,6 @@ const DashboardPage: React.FC = () => {
             onDelete={handleDelete}
           />
         ))}
-        <CreateAlbumPlaceholderCard
-          onCreate={handleCreateNew}
-          loading={isCreatingProject || (projectsLoading && projects.length === 0)}
-        />
       </div>
     </div>
   );
