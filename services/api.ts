@@ -117,10 +117,44 @@ export const Api = {
       }
     }),
 
-  syncProject: (project: any, tracks: any[]) =>
+  syncProject: (project: any, tracks: any[], token?: string) =>
     request('/api/projects/sync', {
       method: 'POST',
-      body: JSON.stringify({ project, tracks })
+      body: JSON.stringify({ project, tracks }),
+      headers: token
+        ? {
+            Authorization: `Bearer ${token}`
+          }
+        : undefined
+    }),
+
+  createProject: (
+    options?: {
+      forceNew?: boolean;
+      ownerUserId?: string;
+      title?: string;
+      artistName?: string;
+    },
+    token?: string
+  ) =>
+    request('/api/projects', {
+      method: 'POST',
+      body: JSON.stringify(options || {}),
+      headers: token
+        ? {
+            Authorization: `Bearer ${token}`
+          }
+        : undefined
+    }),
+
+  deleteProject: (projectId: string, token?: string) =>
+    request(`/api/projects/${encodeURIComponent(projectId)}`, {
+      method: 'DELETE',
+      headers: token
+        ? {
+            Authorization: `Bearer ${token}`
+          }
+        : undefined
     }),
 
   getProjects: (token?: string) =>

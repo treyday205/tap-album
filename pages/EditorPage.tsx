@@ -190,11 +190,18 @@ const EditorPage: React.FC = () => {
       window.clearTimeout(syncTimeoutRef.current);
     }
     syncTimeoutRef.current = window.setTimeout(() => {
-      Api.syncProject(project, tracks)
+      const adminToken = localStorage.getItem('tap_admin_token') || undefined;
+      Api.syncProject(project, tracks, adminToken)
         .then(() => setSyncTick((tick) => tick + 1))
         .catch((err: any) => {
+          const message = String(err?.message || '');
+          if (message.toLowerCase().includes('project not found')) {
+            StorageService.deleteProject(project.projectId);
+            navigate('/dashboard');
+            return;
+          }
           if (import.meta.env.DEV) {
-            console.warn('[DEV] project sync failed', err?.message || err);
+            console.warn('[DEV] project sync failed', message || err);
           }
         });
     }, 800);
@@ -204,7 +211,7 @@ const EditorPage: React.FC = () => {
         window.clearTimeout(syncTimeoutRef.current);
       }
     };
-  }, [project, tracks]);
+  }, [project, tracks, navigate]);
 
   const handleSaveProject = (updates: Partial<Project>) => {
     if (project) {

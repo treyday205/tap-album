@@ -80,6 +80,8 @@ const DashboardPage: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [assetUrls, setAssetUrls] = useState<Record<string, string>>({});
   const [projectsLoading, setProjectsLoading] = useState(true);
+  const [isCreatingProject, setIsCreatingProject] = useState(false);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
 
   useEffect(() => {
     const currentUser = StorageService.getCurrentUser();
@@ -110,7 +112,7 @@ const DashboardPage: React.FC = () => {
     };
 
     const hydrateProjectsFromApi = async () => {
-      const fallbackLocalProjects = readLocalProjects();
+      readLocalProjects();
       try {
         const response = await Api.getProjects(getAdminToken());
         const remoteProjectsRaw = Array.isArray(response?.projects) ? response.projects : [];
@@ -134,7 +136,7 @@ const DashboardPage: React.FC = () => {
         }
         syncLocalProjects(remoteProjects);
       } catch (err) {
-        setProjects(fallbackLocalProjects);
+        setProjects([]);
         if (import.meta.env.DEV) {
           console.warn('[DEV] projects hydrate failed', err);
         }
@@ -254,43 +256,79 @@ const DashboardPage: React.FC = () => {
     navigate('/admin');
   };
 
-  const generateSecureSlug = () => {
-    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-    let slug = 'tap-';
-    for (let i = 0; i < 10; i++) {
-      slug += chars.charAt(Math.floor(Math.random() * chars.length));
+  const upsertProject = (nextProject: Project) => {
+    setProjects((prev) => {
+      const next = [...prev];
+      const index = next.findIndex((project) => project.projectId === nextProject.projectId);
+      if (index >= 0) {
+        next[index] = nextProject;
+      } else {
+        next.unshift(nextProject);
+      }
+      return next.sort(
+        (a, b) =>
+          new Date(String(b.updatedAt || 0)).getTime() - new Date(String(a.updatedAt || 0)).getTime()
+      );
+    });
+  };
+
+  const handleCreateNew = async () => {
+    if (isCreatingProject) return;
+    setIsCreatingProject(true);
+    try {
+      const token = getAdminToken();
+      const response = await Api.createProject(
+        {
+          ownerUserId: user?.userId || 'u1',
+          artistName: user?.displayName || 'Artist Name'
+        },
+        token
+      );
+      const createdProject = sanitizeProjectCover(response?.project as Project);
+      if (!createdProject?.projectId) {
+        throw new Error('Project creation failed.');
+      }
+
+      StorageService.saveProject(createdProject);
+      upsertProject(createdProject);
+
+      const coverRef = String(createdProject.coverImageUrl || '').trim();
+      const coverSignedUrl = String(createdProject.coverSignedUrl || '').trim();
+      if (isAssetRef(coverRef) && coverSignedUrl) {
+        setAssetUrls((prev) => ({ ...prev, [coverRef]: coverSignedUrl }));
+      }
+
+      navigate(`/dashboard/edit/${createdProject.projectId}`);
+    } catch (err: any) {
+      alert(err?.message || 'Unable to create album right now.');
+    } finally {
+      setIsCreatingProject(false);
     }
-    return slug;
   };
 
-  const handleCreateNew = () => {
-    const newProject: Project = {
-      projectId: Math.random().toString(36).substr(2, 9),
-      ownerUserId: user?.userId || 'u1',
-      slug: generateSecureSlug(),
-      title: 'New Album',
-      artistName: user?.displayName || 'Artist Name',
-      coverImageUrl: '',
-      published: false,
-      emailGateEnabled: true,
-      instagramUrl: '',
-      twitterUrl: '',
-      tiktokUrl: '',
-      youtubeUrl: '',
-      facebookUrl: '',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      isPrivate: true
-    };
-    StorageService.saveProject(newProject);
-    navigate(`/dashboard/edit/${newProject.projectId}`);
-  };
-
-  const handleDelete = (id: string, e: React.MouseEvent) => {
+  const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.preventDefault();
-    if (confirm('Are you sure you want to delete this project?')) {
+    if (deletingProjectId === id) return;
+    if (!confirm('Are you sure you want to delete this project?')) {
+      return;
+    }
+
+    setDeletingProjectId(id);
+    try {
+      const token = getAdminToken();
+      await Api.deleteProject(id, token);
       StorageService.deleteProject(id);
       setProjects((prev) => prev.filter((project) => project.projectId !== id));
+    } catch (err: any) {
+      const message = String(err?.message || '');
+      if (message.toLowerCase().includes('project not found')) {
+        StorageService.deleteProject(id);
+        setProjects((prev) => prev.filter((project) => project.projectId !== id));
+      } else {
+        alert(message || 'Unable to delete album right now.');
+      }
+    } finally {
+      setDeletingProjectId(null);
     }
   };
 
@@ -308,10 +346,11 @@ const DashboardPage: React.FC = () => {
         </div>
         <button
           onClick={handleCreateNew}
-          className="flex items-center justify-center gap-2 bg-green-500 hover:bg-green-400 text-black font-bold py-3 px-6 rounded-full transition-all shadow-lg shadow-green-500/20"
+          disabled={isCreatingProject}
+          className="flex items-center justify-center gap-2 bg-green-500 hover:bg-green-400 disabled:bg-green-500/70 text-black font-bold py-3 px-6 rounded-full transition-all shadow-lg shadow-green-500/20 disabled:cursor-wait"
         >
-          <Plus size={20} />
-          Create Private TAP
+          {isCreatingProject ? <Loader2 size={20} className="animate-spin" /> : <Plus size={20} />}
+          {isCreatingProject ? 'Creating...' : 'Create Private TAP'}
         </button>
       </header>
 
@@ -326,7 +365,10 @@ const DashboardPage: React.FC = () => {
             onDelete={handleDelete}
           />
         ))}
-        <CreateAlbumPlaceholderCard onCreate={handleCreateNew} loading={projectsLoading && projects.length === 0} />
+        <CreateAlbumPlaceholderCard
+          onCreate={handleCreateNew}
+          loading={isCreatingProject || (projectsLoading && projects.length === 0)}
+        />
       </div>
     </div>
   );
