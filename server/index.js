@@ -82,6 +82,7 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const RESEND_FROM = process.env.RESEND_FROM;
 const MAGIC_TTL_MS = 15 * 60 * 1000;
 const MAX_PINS_PER_EMAIL = 1_000_000;
+const MAX_PIN_UNLOCKS_PER_PROJECT = 1_000_000;
 const IS_DEV = process.env.NODE_ENV !== 'production';
 const MAX_AUDIO_BYTES = 1024 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -675,6 +676,54 @@ const ensureAccessRemaining = async (access, client) => {
   return updated.rows[0] || { ...access, remaining: MAX_PINS_PER_EMAIL };
 };
 
+const getProjectUnlockStats = async (projectId, client) => {
+  const result = await query(
+    'SELECT pin_unlock_count FROM projects WHERE project_id = $1 LIMIT 1',
+    [projectId],
+    client
+  );
+  if (result.rows.length === 0) {
+    return null;
+  }
+
+  const unlocksUsedRaw = Number(result.rows[0].pin_unlock_count);
+  const unlocksUsed = Number.isFinite(unlocksUsedRaw) ? Math.max(0, unlocksUsedRaw) : 0;
+  return {
+    unlocksUsed,
+    unlocksRemaining: Math.max(0, MAX_PIN_UNLOCKS_PER_PROJECT - unlocksUsed),
+    unlocksLimit: MAX_PIN_UNLOCKS_PER_PROJECT
+  };
+};
+
+const reserveProjectUnlockSlot = async (projectId, client) => {
+  const updated = await query(
+    `UPDATE projects
+       SET pin_unlock_count = pin_unlock_count + 1
+     WHERE project_id = $1
+       AND pin_unlock_count < $2
+     RETURNING pin_unlock_count`,
+    [projectId, MAX_PIN_UNLOCKS_PER_PROJECT],
+    client
+  );
+
+  if (updated.rows.length > 0) {
+    const unlocksUsedRaw = Number(updated.rows[0].pin_unlock_count);
+    const unlocksUsed = Number.isFinite(unlocksUsedRaw) ? Math.max(0, unlocksUsedRaw) : 0;
+    return {
+      ok: true,
+      unlocksUsed,
+      unlocksRemaining: Math.max(0, MAX_PIN_UNLOCKS_PER_PROJECT - unlocksUsed),
+      unlocksLimit: MAX_PIN_UNLOCKS_PER_PROJECT
+    };
+  }
+
+  const stats = await getProjectUnlockStats(projectId, client);
+  if (!stats) {
+    return { ok: false, reason: 'PROJECT_NOT_FOUND' };
+  }
+  return { ok: false, reason: 'CAPACITY_REACHED', ...stats };
+};
+
 const getAccessRecord = async (projectId, email, client) => {
   const normalized = normalizeEmail(email);
   const existing = await query(
@@ -841,6 +890,8 @@ const buildProjectPayload = async (row, options = {}) => {
   const coverPath = normalizeCoverPath(row?.cover_image_url);
   const trackCountValue = Number(row?.track_count);
   const trackCount = Number.isFinite(trackCountValue) ? trackCountValue : undefined;
+  const pinUnlockCountValue = Number(row?.pin_unlock_count);
+  const pinUnlockCount = Number.isFinite(pinUnlockCountValue) ? Math.max(0, pinUnlockCountValue) : 0;
   const coverSignedUrl = includeSignedCover
     ? await getSignedCoverUrlForPath(coverPath)
     : null;
@@ -858,6 +909,9 @@ const buildProjectPayload = async (row, options = {}) => {
     coverSignedUrl,
     coverSignedUrlReady,
     trackCount,
+    pinUnlockCount,
+    pinUnlockLimit: MAX_PIN_UNLOCKS_PER_PROJECT,
+    pinUnlockRemaining: Math.max(0, MAX_PIN_UNLOCKS_PER_PROJECT - pinUnlockCount),
     published: row.published,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -1136,6 +1190,10 @@ app.post('/api/access/status', auth, async (req, res) => {
   }
 
   try {
+    const projectUnlockStats = await getProjectUnlockStats(projectId);
+    if (!projectUnlockStats) {
+      return res.status(404).json({ message: 'Project not found.' });
+    }
     const access = await getAccessRecord(projectId, req.user.email);
     const pinResult = await query(
       'SELECT id FROM pins WHERE access_id = $1 AND used = false ORDER BY created_at DESC LIMIT 1',
@@ -1146,7 +1204,10 @@ app.post('/api/access/status', auth, async (req, res) => {
       verified: access.verified,
       unlocked: access.unlocked,
       remaining: access.remaining,
-      hasActivePin: pinResult.rows.length > 0
+      hasActivePin: pinResult.rows.length > 0,
+      projectUnlocksUsed: projectUnlockStats.unlocksUsed,
+      projectUnlocksRemaining: projectUnlockStats.unlocksRemaining,
+      projectUnlocksLimit: projectUnlockStats.unlocksLimit
     });
   } catch (err) {
     console.error('Access status failed:', err);
@@ -1257,6 +1318,15 @@ app.post('/api/pins/issue', auth, async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(403).json({ message: 'No remaining PIN uses.' });
     }
+    const projectUnlockStats = await getProjectUnlockStats(projectId, client);
+    if (!projectUnlockStats) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+    if (projectUnlockStats.unlocksRemaining <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'Album PIN activation capacity reached.' });
+    }
 
     await client.query('DELETE FROM pins WHERE access_id = $1 AND used = false', [access.id]);
 
@@ -1267,7 +1337,13 @@ app.post('/api/pins/issue', auth, async (req, res) => {
     );
 
     await client.query('COMMIT');
-    return res.json({ pin, remaining: access.remaining });
+    return res.json({
+      pin,
+      remaining: access.remaining,
+      projectUnlocksUsed: projectUnlockStats.unlocksUsed,
+      projectUnlocksRemaining: projectUnlockStats.unlocksRemaining,
+      projectUnlocksLimit: projectUnlockStats.unlocksLimit
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('Issue pin failed:', err);
@@ -1307,12 +1383,24 @@ app.post('/api/pins/verify', auth, async (req, res) => {
       return res.status(401).json({ message: 'Email not verified.' });
     }
     access = await ensureAccessRemaining(access, client);
+    const projectUnlockStats = await getProjectUnlockStats(projectId, client);
+    if (!projectUnlockStats) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Project not found.' });
+    }
     if (access.unlocked) {
       await client.query('ROLLBACK');
       if (IS_DEV) {
         console.log('[DEV] pin-verify already unlocked', { projectId, email: req.user.email });
       }
-      return res.json({ success: true, unlocked: true, remaining: access.remaining });
+      return res.json({
+        success: true,
+        unlocked: true,
+        remaining: access.remaining,
+        projectUnlocksUsed: projectUnlockStats.unlocksUsed,
+        projectUnlocksRemaining: projectUnlockStats.unlocksRemaining,
+        projectUnlocksLimit: projectUnlockStats.unlocksLimit
+      });
     }
 
     const pinRow = await client.query(
@@ -1326,6 +1414,15 @@ app.post('/api/pins/verify', auth, async (req, res) => {
         console.log('[DEV] pin-verify failed', { projectId, email: req.user.email });
       }
       return res.status(400).json({ message: 'Incorrect PIN.' });
+    }
+
+    const reservedSlot = await reserveProjectUnlockSlot(projectId, client);
+    if (!reservedSlot.ok) {
+      await client.query('ROLLBACK');
+      if (reservedSlot.reason === 'PROJECT_NOT_FOUND') {
+        return res.status(404).json({ message: 'Project not found.' });
+      }
+      return res.status(403).json({ message: 'Album PIN activation capacity reached.' });
     }
 
     const pinRecord = pinRow.rows[0];
@@ -1342,9 +1439,21 @@ app.post('/api/pins/verify', auth, async (req, res) => {
 
     await client.query('COMMIT');
     if (IS_DEV) {
-      console.log('[DEV] pin-verify success', { projectId, email: req.user.email, remaining });
+      console.log('[DEV] pin-verify success', {
+        projectId,
+        email: req.user.email,
+        remaining,
+        projectUnlocksUsed: reservedSlot.unlocksUsed
+      });
     }
-    return res.json({ success: true, unlocked: true, remaining });
+    return res.json({
+      success: true,
+      unlocked: true,
+      remaining,
+      projectUnlocksUsed: reservedSlot.unlocksUsed,
+      projectUnlocksRemaining: reservedSlot.unlocksRemaining,
+      projectUnlocksLimit: reservedSlot.unlocksLimit
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('Verify pin failed:', err);

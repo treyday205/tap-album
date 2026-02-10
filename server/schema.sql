@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS pins (
 
 CREATE INDEX IF NOT EXISTS idx_magic_links_expires ON magic_links (expires_at);
 CREATE INDEX IF NOT EXISTS idx_pins_access_used ON pins (access_id, used);
+CREATE INDEX IF NOT EXISTS idx_access_records_project_unlocked ON access_records (project_id, unlocked);
 
 CREATE TABLE IF NOT EXISTS projects (
   project_id TEXT PRIMARY KEY,
@@ -46,11 +47,29 @@ CREATE TABLE IF NOT EXISTS projects (
   title TEXT NOT NULL,
   artist_name TEXT NOT NULL,
   cover_image_url TEXT,
+  pin_unlock_count INTEGER NOT NULL DEFAULT 0,
   published BOOLEAN NOT NULL DEFAULT false,
   data JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE projects
+  ADD COLUMN IF NOT EXISTS pin_unlock_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE projects
+  ALTER COLUMN pin_unlock_count SET DEFAULT 0;
+
+UPDATE projects p
+SET pin_unlock_count = stats.unlocked_count
+FROM (
+  SELECT project_id, COUNT(*)::int AS unlocked_count
+  FROM access_records
+  WHERE unlocked = true
+  GROUP BY project_id
+) stats
+WHERE p.project_id = stats.project_id
+  AND p.pin_unlock_count < stats.unlocked_count;
 
 CREATE TABLE IF NOT EXISTS tracks (
   track_id TEXT PRIMARY KEY,

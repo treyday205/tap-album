@@ -43,7 +43,15 @@ const EditorPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'general' | 'tracks' | 'links' | 'security'>('general');
   const [isSaved, setIsSaved] = useState(true);
   const [showMobilePreview, setShowMobilePreview] = useState(true);
-  const [accessStatus, setAccessStatus] = useState<{ verified: boolean; unlocked: boolean; remaining: number; hasActivePin: boolean } | null>(null);
+  const [accessStatus, setAccessStatus] = useState<{
+    verified: boolean;
+    unlocked: boolean;
+    remaining: number;
+    hasActivePin: boolean;
+    projectUnlocksUsed?: number;
+    projectUnlocksRemaining?: number;
+    projectUnlocksLimit?: number;
+  } | null>(null);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<string | null>(null);
   const [syncTick, setSyncTick] = useState(0);
@@ -838,10 +846,10 @@ const EditorPage: React.FC = () => {
                       </p>
                     </div>
                     <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/50">
-                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Unlock Behavior</p>
-                      <p className="text-sm font-bold text-slate-100">Permanent per email</p>
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Album Unlock Capacity</p>
+                      <p className="text-sm font-bold text-slate-100">1,000,000 active unlocks per album</p>
                       <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-2">
-                        After the first PIN success, access is automatic for that email.
+                        Each verified email unlock is counted per project and does not reduce other emails.
                       </p>
                     </div>
                   </div>
@@ -894,6 +902,28 @@ const EditorPage: React.FC = () => {
                             <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Active PIN</p>
                             <p className={`text-sm font-bold ${accessStatus.hasActivePin ? 'text-green-400' : 'text-slate-400'}`}>
                               {accessStatus.hasActivePin ? 'Issued' : 'None'}
+                            </p>
+                          </div>
+                          <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
+                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album Unlocks Used</p>
+                            <p className="text-sm font-bold text-white">
+                              {typeof accessStatus.projectUnlocksUsed === 'number'
+                                ? accessStatus.projectUnlocksUsed.toLocaleString()
+                                : 'N/A'}
+                            </p>
+                          </div>
+                          <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
+                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album Unlocks Remaining</p>
+                            <p className="text-sm font-bold text-white">
+                              {typeof accessStatus.projectUnlocksRemaining === 'number'
+                                ? accessStatus.projectUnlocksRemaining.toLocaleString()
+                                : 'N/A'}
+                            </p>
+                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-2">
+                              Limit:{' '}
+                              {typeof accessStatus.projectUnlocksLimit === 'number'
+                                ? accessStatus.projectUnlocksLimit.toLocaleString()
+                                : '1,000,000'}
                             </p>
                           </div>
                         </div>

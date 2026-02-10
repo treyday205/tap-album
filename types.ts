@@ -22,6 +22,9 @@ export interface Project {
   coverPath?: string | null;
   coverSignedUrl?: string | null;
   trackCount?: number;
+  pinUnlockCount?: number;
+  pinUnlockLimit?: number;
+  pinUnlockRemaining?: number;
   ticketsUrl?: string;
   merchUrl?: string;
   // Social Media Links
