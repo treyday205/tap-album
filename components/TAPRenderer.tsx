@@ -169,12 +169,14 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({ project, tracks, isPreview = 
   }, [project.projectId, project.slug, tracks.length, mp3Tracks.length]);
 
   const resolvedCover = resolveUrl(project.coverImageUrl || '');
-  const coverSrc = resolvedCover || 'https://picsum.photos/800/800?grayscale';
+  const coverSrc = resolvedCover || '';
 
   const nowPlayingTrack = currentlyPlayingTrackId
     ? displayTracks.find((track) => track.trackId === currentlyPlayingTrackId) || tracks.find((track) => track.trackId === currentlyPlayingTrackId) || null
     : null;
-  const nowPlayingArtwork = nowPlayingTrack ? (resolveUrl(nowPlayingTrack.artworkUrl || '') || coverSrc) : coverSrc;
+  const nowPlayingArtwork = nowPlayingTrack
+    ? (resolveUrl(nowPlayingTrack.artworkUrl || '') || coverSrc)
+    : coverSrc;
   const progressMax = duration > 0 ? duration : 1;
   const progressValue = Math.min(progressMax, Math.max(0, currentTime));
 
@@ -273,14 +275,18 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({ project, tracks, isPreview = 
         {showCover && (
           <div className={`${isPreview ? 'px-6 pt-8 pb-4' : 'px-4 pt-5 pb-4'} flex justify-center`}>
             <div className={`${isPreview ? 'max-w-[280px] rounded-[2.5rem]' : 'max-w-[360px] rounded-[2.1rem]'} relative aspect-square w-full shadow-[0_30px_70px_rgba(0,0,0,0.7)] overflow-hidden border border-white/10 ring-1 ring-white/5`}>
-              <img
-                src={coverSrc}
-                alt={project.title}
-                className="w-full h-full object-cover"
-                loading={isPreview ? 'lazy' : 'eager'}
-                fetchPriority={isPreview ? 'auto' : 'high'}
-                decoding="async"
-              />
+              {coverSrc ? (
+                <img
+                  src={coverSrc}
+                  alt={project.title}
+                  className="w-full h-full object-cover"
+                  loading={isPreview ? 'lazy' : 'eager'}
+                  fetchPriority={isPreview ? 'auto' : 'high'}
+                  decoding="async"
+                />
+              ) : (
+                <div className="w-full h-full bg-slate-900/70" />
+              )}
               {isPreview && (
                 <div className="absolute inset-0 bg-gradient-to-b from-black/5 via-transparent to-black/35"></div>
               )}
@@ -382,7 +388,11 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({ project, tracks, isPreview = 
           <div className="pointer-events-auto mx-auto w-full max-w-[520px] rounded-[1.7rem] border border-white/10 bg-slate-900/90 backdrop-blur-2xl shadow-[0_-20px_60px_rgba(0,0,0,0.65)] p-3">
             <div className="flex items-center gap-3">
               <div className="w-12 h-12 rounded-xl overflow-hidden border border-slate-700/80 bg-slate-800 flex-shrink-0">
-                <img src={nowPlayingArtwork} alt={nowPlayingTrack.title} className="w-full h-full object-cover" loading="eager" decoding="async" />
+                {nowPlayingArtwork ? (
+                  <img src={nowPlayingArtwork} alt={nowPlayingTrack.title} className="w-full h-full object-cover" loading="eager" decoding="async" />
+                ) : (
+                  <div className="w-full h-full bg-slate-800" />
+                )}
               </div>
               <div className="min-w-0 flex-1">
                 <p className="text-[10px] uppercase tracking-[0.24em] font-black text-slate-500">Now Playing</p>
