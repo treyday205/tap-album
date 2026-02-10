@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS projects (
   artist_name TEXT NOT NULL,
   cover_image_url TEXT,
   pin_unlock_count INTEGER NOT NULL DEFAULT 0,
+  pin_active_count INTEGER NOT NULL DEFAULT 0,
   published BOOLEAN NOT NULL DEFAULT false,
   data JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -58,7 +59,13 @@ ALTER TABLE projects
   ADD COLUMN IF NOT EXISTS pin_unlock_count INTEGER NOT NULL DEFAULT 0;
 
 ALTER TABLE projects
+  ADD COLUMN IF NOT EXISTS pin_active_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE projects
   ALTER COLUMN pin_unlock_count SET DEFAULT 0;
+
+ALTER TABLE projects
+  ALTER COLUMN pin_active_count SET DEFAULT 0;
 
 UPDATE projects p
 SET pin_unlock_count = stats.unlocked_count
@@ -70,6 +77,22 @@ FROM (
 ) stats
 WHERE p.project_id = stats.project_id
   AND p.pin_unlock_count < stats.unlocked_count;
+
+UPDATE projects p
+SET pin_active_count = COALESCE(stats.active_count, 0)
+FROM (
+  SELECT p2.project_id, COALESCE(ap.active_count, 0) AS active_count
+  FROM projects p2
+  LEFT JOIN (
+    SELECT ar.project_id, COUNT(*)::int AS active_count
+    FROM access_records ar
+    JOIN pins pin ON pin.access_id = ar.id
+    WHERE pin.used = false
+    GROUP BY ar.project_id
+  ) ap ON ap.project_id = p2.project_id
+) stats
+WHERE p.project_id = stats.project_id
+  AND p.pin_active_count <> stats.active_count;
 
 CREATE TABLE IF NOT EXISTS tracks (
   track_id TEXT PRIMARY KEY,

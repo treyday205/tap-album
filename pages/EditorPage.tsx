@@ -51,6 +51,9 @@ const EditorPage: React.FC = () => {
     projectUnlocksUsed?: number;
     projectUnlocksRemaining?: number;
     projectUnlocksLimit?: number;
+    projectActivePinsUsed?: number;
+    projectActivePinsRemaining?: number;
+    projectActivePinsLimit?: number;
   } | null>(null);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<string | null>(null);
@@ -837,7 +840,7 @@ const EditorPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/50">
                       <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">PIN Allowance</p>
                       <p className="text-sm font-bold text-slate-100">1,000,000 uses per email</p>
@@ -850,6 +853,13 @@ const EditorPage: React.FC = () => {
                       <p className="text-sm font-bold text-slate-100">1,000,000 active unlocks per album</p>
                       <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-2">
                         Each verified email unlock is counted per project and does not reduce other emails.
+                      </p>
+                    </div>
+                    <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/50">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Album Active PIN Capacity</p>
+                      <p className="text-sm font-bold text-slate-100">1,000,000 active PINs per album</p>
+                      <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-2">
+                        Concurrent active PIN issuance is isolated per project and does not impact other albums.
                       </p>
                     </div>
                   </div>
@@ -923,6 +933,28 @@ const EditorPage: React.FC = () => {
                               Limit:{' '}
                               {typeof accessStatus.projectUnlocksLimit === 'number'
                                 ? accessStatus.projectUnlocksLimit.toLocaleString()
+                                : '1,000,000'}
+                            </p>
+                          </div>
+                          <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
+                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album Active PINs Used</p>
+                            <p className="text-sm font-bold text-white">
+                              {typeof accessStatus.projectActivePinsUsed === 'number'
+                                ? accessStatus.projectActivePinsUsed.toLocaleString()
+                                : 'N/A'}
+                            </p>
+                          </div>
+                          <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
+                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album Active PINs Remaining</p>
+                            <p className="text-sm font-bold text-white">
+                              {typeof accessStatus.projectActivePinsRemaining === 'number'
+                                ? accessStatus.projectActivePinsRemaining.toLocaleString()
+                                : 'N/A'}
+                            </p>
+                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-2">
+                              Limit:{' '}
+                              {typeof accessStatus.projectActivePinsLimit === 'number'
+                                ? accessStatus.projectActivePinsLimit.toLocaleString()
                                 : '1,000,000'}
                             </p>
                           </div>

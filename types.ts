@@ -25,6 +25,9 @@ export interface Project {
   pinUnlockCount?: number;
   pinUnlockLimit?: number;
   pinUnlockRemaining?: number;
+  pinActiveCount?: number;
+  pinActiveLimit?: number;
+  pinActiveRemaining?: number;
   ticketsUrl?: string;
   merchUrl?: string;
   // Social Media Links
