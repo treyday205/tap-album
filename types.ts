@@ -19,6 +19,9 @@ export interface Project {
   title: string;
   artistName: string;
   coverImageUrl: string;
+  coverPath?: string | null;
+  coverSignedUrl?: string | null;
+  trackCount?: number;
   ticketsUrl?: string;
   merchUrl?: string;
   // Social Media Links

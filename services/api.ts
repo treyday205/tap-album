@@ -123,6 +123,37 @@ export const Api = {
       body: JSON.stringify({ project, tracks })
     }),
 
+  getProjects: (token?: string) =>
+    request('/api/projects', {
+      method: 'GET',
+      headers: token
+        ? {
+            Authorization: `Bearer ${token}`
+          }
+        : undefined
+    }),
+
+  getProjectCoverUrl: (projectId: string, token?: string) =>
+    request(`/api/projects/${encodeURIComponent(projectId)}/cover-url`, {
+      method: 'GET',
+      headers: token
+        ? {
+            Authorization: `Bearer ${token}`
+          }
+        : undefined
+    }),
+
+  updateProjectCover: (projectId: string, coverImageUrl: string, token?: string) =>
+    request(`/api/projects/${encodeURIComponent(projectId)}/cover`, {
+      method: 'PATCH',
+      body: JSON.stringify({ coverImageUrl }),
+      headers: token
+        ? {
+            Authorization: `Bearer ${token}`
+          }
+        : undefined
+    }),
+
   getProjectBySlug: (slug: string) =>
     request(`/api/projects/${encodeURIComponent(slug)}`, {
       method: 'GET'

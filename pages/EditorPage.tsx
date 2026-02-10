@@ -365,7 +365,21 @@ const EditorPage: React.FC = () => {
         if (!assetRef) {
           throw new Error('Upload did not return a file URL.');
         }
-        handleSaveProject({ coverImageUrl: assetRef });
+        const adminToken = localStorage.getItem('tap_admin_token') || undefined;
+        try {
+          const persisted = await Api.updateProjectCover(projectId, assetRef, adminToken);
+          const persistedCover = String(
+            persisted?.project?.coverImageUrl ||
+            persisted?.coverPath ||
+            assetRef
+          ).trim();
+          handleSaveProject({
+            coverImageUrl: persistedCover,
+            updatedAt: persisted?.project?.updatedAt || new Date().toISOString()
+          });
+        } catch {
+          handleSaveProject({ coverImageUrl: assetRef });
+        }
         ensureSignedAssets([assetRef]);
       } catch (err: any) {
         try {
