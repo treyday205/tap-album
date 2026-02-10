@@ -51,3 +51,16 @@ Notes:
    - Request magic link from a public album page.
    - Click the email link and confirm you return to the album URL.
    - Verify the session persists after refresh and PIN issuance works.
+
+## Temporary Production Project Health Debug Endpoint
+
+- Set `DEBUG_TOKEN` in production.
+- Call `GET /api/health/projects` with header `X-Debug-Token: <DEBUG_TOKEN>`.
+- Response includes:
+  - `ghostCount`
+  - `total`
+  - `sampleIds`
+  - `expiresAt`
+- Availability:
+  - Production only.
+  - Enabled for 24 hours after server start.

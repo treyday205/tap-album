@@ -39,6 +39,12 @@ const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '200038';
 const ADMIN_OWNER_USER_ID = normalizeOwnerUserId(process.env.ADMIN_OWNER_USER_ID, 'u1');
 const UPLOAD_DEBUG = process.env.UPLOAD_DEBUG === 'true';
+const DEBUG_TOKEN = String(process.env.DEBUG_TOKEN || '').trim();
+const DEBUG_ENDPOINT_TTL_MS = 24 * 60 * 60 * 1000;
+const DEBUG_ENDPOINT_STARTED_AT = Date.now();
+const DEBUG_ENDPOINT_EXPIRES_AT = new Date(
+  DEBUG_ENDPOINT_STARTED_AT + DEBUG_ENDPOINT_TTL_MS
+).toISOString();
 const normalizeAppUrl = (value) => {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -733,6 +739,22 @@ const getAdminOwnerScope = (req) => {
   }
   return normalizeOwnerUserId(payload.ownerUserId, ADMIN_OWNER_USER_ID);
 };
+const isDebugTokenValid = (providedToken) => {
+  if (!DEBUG_TOKEN) return false;
+  const rawToken = Array.isArray(providedToken) ? providedToken[0] : providedToken;
+  const provided = Buffer.from(String(rawToken || '').trim());
+  const expected = Buffer.from(DEBUG_TOKEN);
+  if (provided.length !== expected.length) return false;
+  try {
+    return crypto.timingSafeEqual(provided, expected);
+  } catch {
+    return false;
+  }
+};
+const isDebugWindowOpen = () =>
+  !IS_DEV &&
+  Boolean(DEBUG_TOKEN) &&
+  Date.now() <= DEBUG_ENDPOINT_STARTED_AT + DEBUG_ENDPOINT_TTL_MS;
 
 const normalizeCoverPath = (value) => {
   const normalized = String(value || '').trim();
@@ -776,6 +798,7 @@ const buildProjectPayload = async (row, options = {}) => {
   const coverSignedUrl = includeSignedCover
     ? await getSignedCoverUrlForPath(coverPath)
     : null;
+  const coverSignedUrlReady = Boolean(coverPath && coverSignedUrl);
 
   return {
     ...projectData,
@@ -787,6 +810,7 @@ const buildProjectPayload = async (row, options = {}) => {
     coverImageUrl: coverPath || '',
     coverPath,
     coverSignedUrl,
+    coverSignedUrlReady,
     trackCount,
     published: row.published,
     createdAt: row.created_at,
@@ -805,6 +829,90 @@ app.get('/health', (_req, res) => {
     supabaseAdminConfigured: hasSupabaseAdminConfig(),
     allowedOrigins: Array.from(ALLOWED_ORIGINS)
   });
+});
+
+app.get('/api/health/projects', async (req, res) => {
+  if (IS_DEV || !DEBUG_TOKEN) {
+    return res.status(404).json({ message: 'Not found.' });
+  }
+  if (!isDebugWindowOpen()) {
+    return res.status(410).json({
+      message: 'Debug endpoint expired.',
+      expiresAt: DEBUG_ENDPOINT_EXPIRES_AT
+    });
+  }
+
+  const providedToken = req.headers['x-debug-token'];
+  if (!isDebugTokenValid(providedToken)) {
+    return res.status(401).json({ message: 'Invalid debug token.' });
+  }
+
+  try {
+    const params = [
+      ADMIN_OWNER_USER_ID,
+      ADMIN_OWNER_USER_ID,
+      AUTO_GENERATED_TITLE,
+      LEGACY_DEFAULT_COVER_URL
+    ];
+    const ownerClause = `COALESCE(NULLIF(BTRIM(p.data->>'ownerUserId'), ''), $2) = $1`;
+    const ghostClause = `
+      ${ownerClause}
+      AND p.title = $3
+      AND COALESCE(tc.track_count, 0) = 0
+      AND COALESCE(BTRIM(p.cover_image_url), '') = $4
+    `;
+
+    const totalResult = await query(
+      `
+      SELECT COUNT(*)::int AS total
+      FROM projects p
+      WHERE ${ownerClause}
+      `,
+      [params[0], params[1]]
+    );
+
+    const ghostCountResult = await query(
+      `
+      SELECT COUNT(*)::int AS ghost_count
+      FROM projects p
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS track_count
+        FROM tracks t
+        WHERE t.project_id = p.project_id
+      ) tc ON TRUE
+      WHERE ${ghostClause}
+      `,
+      params
+    );
+
+    const sampleResult = await query(
+      `
+      SELECT p.project_id
+      FROM projects p
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS track_count
+        FROM tracks t
+        WHERE t.project_id = p.project_id
+      ) tc ON TRUE
+      WHERE ${ghostClause}
+      ORDER BY p.updated_at DESC
+      LIMIT 25
+      `,
+      params
+    );
+
+    return res.json({
+      success: true,
+      ownerUserId: ADMIN_OWNER_USER_ID,
+      total: Number(totalResult.rows[0]?.total || 0),
+      ghostCount: Number(ghostCountResult.rows[0]?.ghost_count || 0),
+      sampleIds: sampleResult.rows.map((row) => row.project_id),
+      expiresAt: DEBUG_ENDPOINT_EXPIRES_AT
+    });
+  } catch (err) {
+    console.error('Project health debug endpoint failed:', err);
+    return res.status(500).json({ message: 'Unable to compute project health metrics.' });
+  }
 });
 
 app.get('/api/storage/status', (_req, res) => {
@@ -1266,11 +1374,21 @@ app.get('/api/projects/:projectId/cover-url', async (req, res) => {
     }
     const coverPath = normalizeCoverPath(row.cover_image_url);
     const coverSignedUrl = await getSignedCoverUrlForPath(coverPath);
+    const coverSignedUrlReady = Boolean(coverPath && coverSignedUrl);
+    if (!IS_DEV) {
+      console.log('[COVER SIGN]', {
+        route: 'cover-url',
+        projectId: row.project_id,
+        hasCoverPath: Boolean(coverPath),
+        coverSignedUrlReady
+      });
+    }
     return res.json({
       success: true,
       projectId: row.project_id,
       coverPath,
       coverSignedUrl,
+      coverSignedUrlReady,
       updatedAt: row.updated_at
     });
   } catch (err) {
@@ -1325,10 +1443,20 @@ app.patch('/api/projects/:projectId/cover', async (req, res) => {
       [safeProjectId, coverImageUrl, nextData]
     );
     const project = await buildProjectPayload(updated.rows[0], { includeSignedCover: true });
+    const coverSignedUrlReady = Boolean(project.coverPath && project.coverSignedUrl);
+    if (!IS_DEV) {
+      console.log('[COVER SIGN]', {
+        route: 'cover-update',
+        projectId: safeProjectId,
+        hasCoverPath: Boolean(project.coverPath),
+        coverSignedUrlReady
+      });
+    }
     return res.json({
       success: true,
       coverPath: project.coverPath || null,
       coverSignedUrl: project.coverSignedUrl || null,
+      coverSignedUrlReady,
       project
     });
   } catch (err) {
