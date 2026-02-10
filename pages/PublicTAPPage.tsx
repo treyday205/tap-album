@@ -17,6 +17,9 @@ import {
 const AUTH_TOKEN_KEY = 'tap_auth_token';
 const AUTH_EMAIL_KEY = 'tap_auth_email';
 const IS_DEV = import.meta.env.DEV;
+const AUTH_TOKEN_PREFIX = `${AUTH_TOKEN_KEY}_`;
+const AUTH_EMAIL_PREFIX = `${AUTH_EMAIL_KEY}_`;
+const UNLOCKED_KEY_PREFIX = 'tap_unlocked_';
 const scopedAuthTokenKey = (projectId: string) => `${AUTH_TOKEN_KEY}_${projectId}`;
 const scopedAuthEmailKey = (projectId: string) => `${AUTH_EMAIL_KEY}_${projectId}`;
 const normalizeProjectId = (value?: string | null) => String(value || '').trim();
@@ -85,9 +88,69 @@ const PublicTAPPage: React.FC = () => {
     if (normalizedProjectId) {
       localStorage.removeItem(scopedAuthTokenKey(normalizedProjectId));
       localStorage.removeItem(scopedAuthEmailKey(normalizedProjectId));
+      localStorage.removeItem(`${UNLOCKED_KEY_PREFIX}${normalizedProjectId}`);
     }
     localStorage.removeItem(AUTH_TOKEN_KEY);
     localStorage.removeItem(AUTH_EMAIL_KEY);
+  };
+
+  const clearAllAuthStorage = () => {
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key) continue;
+      if (
+        key === AUTH_TOKEN_KEY ||
+        key === AUTH_EMAIL_KEY ||
+        key.startsWith(AUTH_TOKEN_PREFIX) ||
+        key.startsWith(AUTH_EMAIL_PREFIX) ||
+        key.startsWith(UNLOCKED_KEY_PREFIX)
+      ) {
+        keysToRemove.push(key);
+      }
+    }
+    keysToRemove.forEach((key) => localStorage.removeItem(key));
+  };
+
+  const clearAuthCookies = () => {
+    if (typeof document === 'undefined') return;
+    const names = String(document.cookie || '')
+      .split(';')
+      .map((entry) => entry.split('=')[0]?.trim())
+      .filter(Boolean);
+    names.forEach((name) => {
+      if (
+        name === AUTH_TOKEN_KEY ||
+        name === AUTH_EMAIL_KEY ||
+        name.startsWith('tap_') ||
+        name.startsWith('sb-')
+      ) {
+        document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
+        if (typeof window !== 'undefined' && window.location?.hostname) {
+          document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=${window.location.hostname}`;
+        }
+      }
+    });
+  };
+
+  const logSessionPath = ({
+    source,
+    sessionReuse,
+    cachedEmail,
+    typedEmail
+  }: {
+    source: string;
+    sessionReuse: boolean;
+    cachedEmail?: string | null;
+    typedEmail?: string | null;
+  }) => {
+    if (!IS_DEV) return;
+    console.log('[DEBUG] session-path', {
+      source,
+      session_reuse: sessionReuse,
+      cachedEmail: cachedEmail || null,
+      typedEmail: typedEmail || null
+    });
   };
 
   useEffect(() => {
@@ -315,6 +378,8 @@ const PublicTAPPage: React.FC = () => {
   const resetAuth = (projectIdOverride?: string | null) => {
     const effectiveProjectId = normalizeProjectId(projectIdOverride || project?.projectId || routeProjectId);
     clearAuthPayload(effectiveProjectId || null);
+    clearAllAuthStorage();
+    clearAuthCookies();
     lastSupabaseAccessTokenRef.current = null;
     supabaseExchangeInFlightRef.current = null;
     if (supabaseAuthClient) {
@@ -371,39 +436,68 @@ const PublicTAPPage: React.FC = () => {
     return run;
   };
 
-  const openModal = async () => {
+  const openModal = () => {
+    const effectiveProjectId = project?.projectId || routeProjectId;
+    const cachedEmail = String(getAuthEmail(effectiveProjectId) || '').trim().toLowerCase();
+    logSessionPath({
+      source: 'continue_with_different_email',
+      sessionReuse: false,
+      cachedEmail,
+      typedEmail: null
+    });
     resetModal();
+    setEmail('');
+    setPinInput('');
+    setError(null);
+    setStep('email');
     setShowModal(true);
+  };
+
+  const handleContinueAsCachedEmail = async () => {
     const effectiveProjectId = project?.projectId || routeProjectId;
     if (!effectiveProjectId) {
-      setStep('email');
+      openModal();
       return;
     }
+
+    const cachedEmail = String(getAuthEmail(effectiveProjectId) || '').trim().toLowerCase();
+    logSessionPath({
+      source: 'continue_as_cached_email',
+      sessionReuse: true,
+      cachedEmail,
+      typedEmail: null
+    });
 
     let token = getAuthToken(effectiveProjectId);
     if (!token) {
       token = await ensureAppToken(effectiveProjectId);
     }
     if (!token) {
-      setStep('email');
+      openModal();
       return;
     }
 
-    setIsIssuing(true);
+    setShowModal(true);
+    setError(null);
     try {
       const status = await Api.getAccessStatus(effectiveProjectId, token);
-      if (status?.verified) {
-        setStep('pin');
-        await handleIssuePin(token, effectiveProjectId);
-      } else {
-        resetAuth(effectiveProjectId);
-        setStep('email');
+      setRemaining(status.remaining ?? null);
+      if (status?.unlocked) {
+        setIsUnlocked(true);
+        setShowModal(false);
+        resetModal();
+        return;
       }
+      if (!status?.verified) {
+        resetAuth(effectiveProjectId);
+        openModal();
+        return;
+      }
+      setStep('pin');
+      await handleIssuePin(token, effectiveProjectId);
     } catch {
       resetAuth(effectiveProjectId);
-      setStep('email');
-    } finally {
-      setIsIssuing(false);
+      openModal();
     }
   };
 
@@ -425,6 +519,13 @@ const PublicTAPPage: React.FC = () => {
       setError('Email is required.');
       return;
     }
+    const cachedEmail = String(getAuthEmail(project.projectId) || '').trim().toLowerCase();
+    logSessionPath({
+      source: 'send_magic_link',
+      sessionReuse: false,
+      cachedEmail,
+      typedEmail: normalizedEmail
+    });
     setIsSending(true);
     setError(null);
 
@@ -694,6 +795,8 @@ const PublicTAPPage: React.FC = () => {
     );
   }
 
+  const cachedSessionEmail = String(getAuthEmail(project.projectId) || '').trim().toLowerCase();
+
   if (!isUnlocked) {
     return (
       <div className="w-full tap-full-height bg-slate-950 flex flex-col items-center justify-center px-5 sm:px-8 text-center animate-in fade-in duration-700 tap-safe-top tap-safe-bottom">
@@ -716,9 +819,18 @@ const PublicTAPPage: React.FC = () => {
             className="w-full min-h-[56px] px-4 rounded-3xl font-black text-xs uppercase tracking-[0.24em] flex items-center justify-center gap-3 transition-all bg-green-500 text-black shadow-xl shadow-green-500/20 active:scale-95 touch-manipulation"
           >
             <Mail size={18} />
-            Continue with Email
+            Continue with a Different Email
             <ArrowRight size={18} />
           </button>
+          {cachedSessionEmail && (
+            <button
+              type="button"
+              onClick={() => void handleContinueAsCachedEmail()}
+              className="mt-3 w-full min-h-[48px] px-4 rounded-2xl font-black text-[10px] uppercase tracking-[0.2em] flex items-center justify-center transition-all bg-slate-800/60 text-slate-200 hover:bg-slate-800 touch-manipulation"
+            >
+              Continue as {cachedSessionEmail}
+            </button>
+          )}
 
           <div className="mt-16 pt-8 border-t border-white/5">
             <p className="text-[9px] font-bold text-slate-700 uppercase tracking-[0.4em] leading-relaxed">
@@ -850,8 +962,14 @@ const PublicTAPPage: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => {
+                      logSessionPath({
+                        source: 'reset_access',
+                        sessionReuse: false,
+                        cachedEmail: String(getAuthEmail(project.projectId) || '').trim().toLowerCase(),
+                        typedEmail: null
+                      });
                       resetAuth();
-                      setShowModal(false);
+                      closeModal();
                     }}
                     className="w-full min-h-[48px] px-4 rounded-xl font-black text-[10px] uppercase tracking-[0.24em] flex items-center justify-center transition-all bg-slate-800/60 text-slate-300 hover:bg-slate-800 touch-manipulation"
                   >
