@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import sharp from 'sharp';
 import pg from 'pg';
 import { Resend } from 'resend';
 import fs from 'fs';
@@ -15,7 +16,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 4000;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const resolveDistDir = () => {
@@ -45,6 +46,8 @@ const DEBUG_ENDPOINT_STARTED_AT = Date.now();
 const DEBUG_ENDPOINT_EXPIRES_AT = new Date(
   DEBUG_ENDPOINT_STARTED_AT + DEBUG_ENDPOINT_TTL_MS
 ).toISOString();
+const STATIC_ASSET_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 365;
+const UPLOAD_ASSET_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30;
 const normalizeAppUrl = (value) => {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -67,6 +70,17 @@ const normalizeRedirectUrl = (value) => {
     return '';
   }
 };
+const getRequestIp = (req) => {
+  const forwarded = req.headers['x-forwarded-for'];
+  const candidate = Array.isArray(forwarded)
+    ? forwarded[0]
+    : typeof forwarded === 'string'
+      ? forwarded.split(',')[0]
+      : req.ip;
+  return String(candidate || '').trim().slice(0, 64) || null;
+};
+const getRequestUserAgent = (req) =>
+  String(req.headers['user-agent'] || '').trim().slice(0, 512) || null;
 const resolveAppUrl = () => {
   const railwayDomain =
     process.env.RAILWAY_PUBLIC_DOMAIN ||
@@ -261,6 +275,35 @@ const signAssetRef = async (ref) => {
   return signAssetKey(key);
 };
 
+const IMAGE_PROXY_FORMATS = new Set(['webp', 'jpeg', 'jpg', 'png', 'avif']);
+const IMAGE_PROXY_MIN_WIDTH = 96;
+const IMAGE_PROXY_MAX_WIDTH = 1600;
+const IMAGE_PROXY_MAX_BYTES = 12 * 1024 * 1024;
+
+const clampNumber = (value, min, max) => Math.min(max, Math.max(min, value));
+
+const normalizeImageFormat = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return null;
+  const formatted = normalized === 'jpg' ? 'jpeg' : normalized;
+  return IMAGE_PROXY_FORMATS.has(formatted) ? formatted : null;
+};
+
+const resolveImageProxyTarget = async ({ ref, url }) => {
+  if (ref) {
+    const signed = await signAssetRef(ref);
+    return signed || null;
+  }
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+};
+
 const sanitizeExtension = (value, allowed) => {
   const ext = String(value || '').trim().toLowerCase().replace(/^\./, '');
   if (!ext || !allowed.has(ext)) {
@@ -394,6 +437,7 @@ const APP_ORIGIN = APP_URL ? new URL(APP_URL).origin : '';
 const ALLOWED_ORIGINS = new Set([
   'http://localhost:5173',
   'http://localhost:5174',
+  'http://127.0.0.1:5174',
   'http://localhost:3000',
   'http://localhost:3001',
   APP_ORIGIN
@@ -401,7 +445,7 @@ const ALLOWED_ORIGINS = new Set([
 
 const CORS_ALLOW_ALL = process.env.CORS_ALLOW_ALL === 'true';
 app.set('trust proxy', 1);
-app.use(cors({
+const corsOptions = {
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
     if (CORS_ALLOW_ALL) return cb(null, true);
@@ -410,9 +454,18 @@ app.use(cors({
     return cb(new Error('Not allowed by CORS'));
   },
   credentials: true
-}));
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json());
-app.use('/uploads', express.static(UPLOADS_ROOT, { fallthrough: false }));
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok' });
+});
+app.use('/uploads', express.static(UPLOADS_ROOT, {
+  fallthrough: false,
+  maxAge: UPLOAD_ASSET_MAX_AGE_MS,
+  immutable: true
+}));
 const resolveRequestOrigin = (req) => {
   const headerOrigin = String(req.headers.origin || '').trim();
   if (headerOrigin) return headerOrigin;
@@ -436,6 +489,7 @@ const getAuthOrigins = (req) =>
       resolveRequestOrigin(req),
       'http://localhost:5173',
       'http://localhost:5174',
+      'http://127.0.0.1:5174',
       'http://localhost:3000'
     ]
       .map((value) => normalizeAppUrl(value))
@@ -662,20 +716,38 @@ const query = (text, params, client) => {
   return runner.query(text, params);
 };
 
-const ensureAccessRemaining = async (access, client) => {
+const normalizeLimit = (value, fallback) => {
+  const normalized = Number(value);
+  if (!Number.isFinite(normalized) || normalized <= 0) {
+    return fallback;
+  }
+  return Math.floor(normalized);
+};
+
+const getSecurityLimitsFromData = (data) => ({
+  unlocksLimit: normalizeLimit(data?.securityUnlockLimit, MAX_PIN_UNLOCKS_PER_PROJECT),
+  activePinsLimit: normalizeLimit(data?.securityActivePinLimit, MAX_ACTIVE_PINS_PER_PROJECT),
+  unlocksPerEmail: normalizeLimit(data?.securityUnlocksPerEmail, MAX_PINS_PER_EMAIL)
+});
+
+const ensureAccessRemaining = async (access, client, limitOverride) => {
   if (!access) return access;
+  const limit = normalizeLimit(limitOverride, MAX_PINS_PER_EMAIL);
   const currentRemaining = Number(access.remaining);
-  if (Number.isFinite(currentRemaining) && currentRemaining >= MAX_PINS_PER_EMAIL) {
+  const nextRemaining = Number.isFinite(currentRemaining)
+    ? Math.max(0, Math.min(currentRemaining, limit))
+    : limit;
+  if (Number.isFinite(currentRemaining) && currentRemaining === nextRemaining) {
     return access;
   }
 
   const updated = await query(
     'UPDATE access_records SET remaining = $2, updated_at = NOW() WHERE id = $1 RETURNING *',
-    [access.id, MAX_PINS_PER_EMAIL],
+    [access.id, nextRemaining],
     client
   );
 
-  return updated.rows[0] || { ...access, remaining: MAX_PINS_PER_EMAIL };
+  return updated.rows[0] || { ...access, remaining: nextRemaining };
 };
 
 const toNonNegativeInt = (value) => {
@@ -684,22 +756,25 @@ const toNonNegativeInt = (value) => {
   return Math.max(0, Math.floor(normalized));
 };
 
-const buildProjectCapacityStats = (row) => {
+const buildProjectCapacityStats = (row, limits) => {
+  const resolvedLimits = limits || getSecurityLimitsFromData(row?.data || {});
+  const unlocksLimit = resolvedLimits.unlocksLimit;
+  const activePinsLimit = resolvedLimits.activePinsLimit;
   const unlocksUsed = toNonNegativeInt(row?.pin_unlock_count);
   const activePinsUsed = toNonNegativeInt(row?.pin_active_count);
   return {
     unlocksUsed,
-    unlocksRemaining: Math.max(0, MAX_PIN_UNLOCKS_PER_PROJECT - unlocksUsed),
-    unlocksLimit: MAX_PIN_UNLOCKS_PER_PROJECT,
+    unlocksRemaining: Math.max(0, unlocksLimit - unlocksUsed),
+    unlocksLimit,
     activePinsUsed,
-    activePinsRemaining: Math.max(0, MAX_ACTIVE_PINS_PER_PROJECT - activePinsUsed),
-    activePinsLimit: MAX_ACTIVE_PINS_PER_PROJECT
+    activePinsRemaining: Math.max(0, activePinsLimit - activePinsUsed),
+    activePinsLimit
   };
 };
 
 const getProjectCapacityStats = async (projectId, client) => {
   const result = await query(
-    'SELECT pin_unlock_count, pin_active_count FROM projects WHERE project_id = $1 LIMIT 1',
+    'SELECT pin_unlock_count, pin_active_count, data FROM projects WHERE project_id = $1 LIMIT 1',
     [projectId],
     client
   );
@@ -720,13 +795,18 @@ const getProjectUnlockStats = async (projectId, client) => {
 };
 
 const reserveProjectUnlockSlot = async (projectId, client) => {
+  const stats = await getProjectCapacityStats(projectId, client);
+  if (!stats) {
+    return { ok: false, reason: 'PROJECT_NOT_FOUND' };
+  }
+  const limit = stats.unlocksLimit;
   const updated = await query(
     `UPDATE projects
        SET pin_unlock_count = pin_unlock_count + 1
      WHERE project_id = $1
        AND pin_unlock_count < $2
      RETURNING pin_unlock_count`,
-    [projectId, MAX_PIN_UNLOCKS_PER_PROJECT],
+    [projectId, limit],
     client
   );
 
@@ -736,26 +816,27 @@ const reserveProjectUnlockSlot = async (projectId, client) => {
     return {
       ok: true,
       unlocksUsed,
-      unlocksRemaining: Math.max(0, MAX_PIN_UNLOCKS_PER_PROJECT - unlocksUsed),
-      unlocksLimit: MAX_PIN_UNLOCKS_PER_PROJECT
+      unlocksRemaining: Math.max(0, limit - unlocksUsed),
+      unlocksLimit: limit
     };
   }
 
-  const stats = await getProjectUnlockStats(projectId, client);
-  if (!stats) {
-    return { ok: false, reason: 'PROJECT_NOT_FOUND' };
-  }
   return { ok: false, reason: 'CAPACITY_REACHED', ...stats };
 };
 
 const reserveProjectActivePinSlot = async (projectId, client) => {
+  const stats = await getProjectCapacityStats(projectId, client);
+  if (!stats) {
+    return { ok: false, reason: 'PROJECT_NOT_FOUND' };
+  }
+  const limit = stats.activePinsLimit;
   const updated = await query(
     `UPDATE projects
        SET pin_active_count = pin_active_count + 1
      WHERE project_id = $1
        AND pin_active_count < $2
      RETURNING pin_active_count, pin_unlock_count`,
-    [projectId, MAX_ACTIVE_PINS_PER_PROJECT],
+    [projectId, limit],
     client
   );
 
@@ -763,10 +844,6 @@ const reserveProjectActivePinSlot = async (projectId, client) => {
     return { ok: true, ...buildProjectCapacityStats(updated.rows[0]) };
   }
 
-  const stats = await getProjectCapacityStats(projectId, client);
-  if (!stats) {
-    return { ok: false, reason: 'PROJECT_NOT_FOUND' };
-  }
   return { ok: false, reason: 'CAPACITY_REACHED', ...stats };
 };
 
@@ -792,6 +869,13 @@ const releaseProjectActivePinSlots = async (projectId, count, client) => {
 
 const getAccessRecord = async (projectId, email, client) => {
   const normalized = normalizeEmail(email);
+  const projectResult = await query(
+    'SELECT data FROM projects WHERE project_id = $1 LIMIT 1',
+    [projectId],
+    client
+  );
+  const projectData = projectResult.rows.length > 0 ? projectResult.rows[0].data : {};
+  const limits = getSecurityLimitsFromData(projectData);
   const existing = await query(
     'SELECT * FROM access_records WHERE project_id = $1 AND email = $2',
     [projectId, normalized],
@@ -799,7 +883,7 @@ const getAccessRecord = async (projectId, email, client) => {
   );
 
   if (existing.rows.length > 0) {
-    return ensureAccessRemaining(existing.rows[0], client);
+    return ensureAccessRemaining(existing.rows[0], client, limits.unlocksPerEmail);
   }
 
   const id = crypto.randomUUID();
@@ -807,7 +891,7 @@ const getAccessRecord = async (projectId, email, client) => {
     `INSERT INTO access_records (id, project_id, email, verified, unlocked, remaining)
      VALUES ($1, $2, $3, false, false, $4)
      RETURNING *`,
-    [id, projectId, normalized, MAX_PINS_PER_EMAIL],
+    [id, projectId, normalized, limits.unlocksPerEmail],
     client
   );
 
@@ -960,6 +1044,7 @@ const createDefaultProjectPayload = ({ ownerUserId, projectId, slug, title, arti
 const buildProjectPayload = async (row, options = {}) => {
   const includeSignedCover = Boolean(options.includeSignedCover);
   const projectData = row?.data && typeof row.data === 'object' ? row.data : {};
+  const limits = getSecurityLimitsFromData(projectData);
   const ownerUserId = ownerUserIdFromData(projectData);
   const coverPath = normalizeCoverPath(row?.cover_image_url);
   const trackCountValue = Number(row?.track_count);
@@ -986,11 +1071,11 @@ const buildProjectPayload = async (row, options = {}) => {
     coverSignedUrlReady,
     trackCount,
     pinUnlockCount,
-    pinUnlockLimit: MAX_PIN_UNLOCKS_PER_PROJECT,
-    pinUnlockRemaining: Math.max(0, MAX_PIN_UNLOCKS_PER_PROJECT - pinUnlockCount),
+    pinUnlockLimit: limits.unlocksLimit,
+    pinUnlockRemaining: Math.max(0, limits.unlocksLimit - pinUnlockCount),
     pinActiveCount,
-    pinActiveLimit: MAX_ACTIVE_PINS_PER_PROJECT,
-    pinActiveRemaining: Math.max(0, MAX_ACTIVE_PINS_PER_PROJECT - pinActiveCount),
+    pinActiveLimit: limits.activePinsLimit,
+    pinActiveRemaining: Math.max(0, limits.activePinsLimit - pinActiveCount),
     published: row.published,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -1109,6 +1194,84 @@ app.post('/api/uploads/telemetry', (req, res) => {
   }
   logUpload('telemetry', req.body || {});
   return res.json({ ok: true });
+});
+
+app.get('/api/images/resize', async (req, res) => {
+  const ref = String(req.query?.ref || '').trim();
+  const url = String(req.query?.url || '').trim();
+  const widthRaw = Number(req.query?.w);
+  const qualityRaw = Number(req.query?.q);
+  const width = Number.isFinite(widthRaw)
+    ? clampNumber(Math.round(widthRaw), IMAGE_PROXY_MIN_WIDTH, IMAGE_PROXY_MAX_WIDTH)
+    : IMAGE_PROXY_MAX_WIDTH;
+  const quality = Number.isFinite(qualityRaw)
+    ? clampNumber(Math.round(qualityRaw), 50, 88)
+    : 78;
+  const format = normalizeImageFormat(req.query?.format);
+
+  if (!ref && !url) {
+    return res.status(400).json({ message: 'Image ref or url is required.' });
+  }
+
+  try {
+    let targetUrl = await resolveImageProxyTarget({ ref: ref || null, url: url || null });
+    if (!targetUrl) {
+      return res.status(400).json({ message: 'Invalid image source.' });
+    }
+    if (targetUrl.startsWith('/')) {
+      const baseUrl = `${req.protocol}://${req.get('host')}`;
+      targetUrl = `${baseUrl}${targetUrl}`;
+    }
+
+    const response = await fetch(targetUrl);
+    if (!response.ok) {
+      return res.status(404).json({ message: 'Image not found.' });
+    }
+
+    const contentType = String(response.headers.get('content-type') || '');
+    if (!contentType.startsWith('image/')) {
+      return res.status(415).json({ message: 'Unsupported image type.' });
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > IMAGE_PROXY_MAX_BYTES) {
+      return res.status(413).json({ message: 'Image too large to resize.' });
+    }
+
+    let pipeline = sharp(buffer, { limitInputPixels: 40_000_000 }).rotate();
+    if (width) {
+      pipeline = pipeline.resize({ width, withoutEnlargement: true });
+    }
+
+    let outputType = 'image/jpeg';
+    switch (format) {
+      case 'webp':
+        pipeline = pipeline.webp({ quality });
+        outputType = 'image/webp';
+        break;
+      case 'avif':
+        pipeline = pipeline.avif({ quality: clampNumber(quality, 45, 65) });
+        outputType = 'image/avif';
+        break;
+      case 'png':
+        pipeline = pipeline.png({ compressionLevel: 9 });
+        outputType = 'image/png';
+        break;
+      case 'jpeg':
+      default:
+        pipeline = pipeline.jpeg({ quality, mozjpeg: true });
+        outputType = 'image/jpeg';
+        break;
+    }
+
+    const output = await pipeline.toBuffer();
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('Content-Type', outputType);
+    return res.status(200).send(output);
+  } catch (err) {
+    console.error('[IMAGE RESIZE] failed', err?.message || err);
+    return res.status(500).json({ message: 'Unable to resize image.' });
+  }
 });
 
 app.post('/api/admin/login', (req, res) => {
@@ -1386,7 +1549,12 @@ app.post('/api/pins/issue', auth, async (req, res) => {
         [crypto.randomUUID(), projectId, normalizeEmail(req.user.email), MAX_PINS_PER_EMAIL]
       )).rows[0];
     }
-    access = await ensureAccessRemaining(access, client);
+    const projectConfigResult = await client.query(
+      'SELECT data FROM projects WHERE project_id = $1 LIMIT 1',
+      [projectId]
+    );
+    const projectLimits = getSecurityLimitsFromData(projectConfigResult.rows[0]?.data || {});
+    access = await ensureAccessRemaining(access, client, projectLimits.unlocksPerEmail);
 
     if (!access.verified) {
       await client.query('ROLLBACK');
@@ -1547,8 +1715,8 @@ app.post('/api/pins/verify', auth, async (req, res) => {
 
     const remaining = Math.max(0, access.remaining - 1);
     await client.query(
-      'UPDATE access_records SET unlocked = true, unlocked_at = NOW(), remaining = $2, updated_at = NOW() WHERE id = $1',
-      [access.id, remaining]
+      'UPDATE access_records SET unlocked = true, unlocked_at = NOW(), remaining = $2, updated_at = NOW(), last_ip = $3, last_user_agent = $4 WHERE id = $1',
+      [access.id, remaining, getRequestIp(req), getRequestUserAgent(req)]
     );
 
     const updatedProjectCapacityStats = await getProjectCapacityStats(projectId, client);
@@ -1814,6 +1982,289 @@ app.get('/api/projects/:projectId/security-stats', async (req, res) => {
   } catch (err) {
     console.error('Project security stats failed:', err);
     return res.status(500).json({ message: 'Unable to load project security stats.' });
+  }
+});
+
+app.get('/api/projects/:projectId/unlock-activity', async (req, res) => {
+  const safeProjectId = safeSegment(req.params.projectId);
+  if (!safeProjectId) {
+    return res.status(400).json({ message: 'projectId is required.' });
+  }
+  if (!IS_DEV && !isAdminRequest(req)) {
+    return res.status(401).json({ message: 'Admin token required.' });
+  }
+  const ownerScope = IS_DEV ? ADMIN_OWNER_USER_ID : getAdminOwnerScope(req);
+  if (!ownerScope) {
+    return res.status(401).json({ message: 'Admin owner scope is required.' });
+  }
+
+  try {
+    const ownerResult = await query(
+      'SELECT data FROM projects WHERE project_id = $1 LIMIT 1',
+      [safeProjectId]
+    );
+    if (ownerResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+    const rowOwner = ownerUserIdFromData(ownerResult.rows[0].data);
+    if (rowOwner !== ownerScope) {
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+
+    const activityResult = await query(
+      `SELECT email, unlocked_at, updated_at, last_ip, last_user_agent
+       FROM access_records
+       WHERE project_id = $1 AND unlocked = true
+       ORDER BY unlocked_at DESC NULLS LAST, updated_at DESC
+       LIMIT 10`,
+      [safeProjectId]
+    );
+
+    res.set('Cache-Control', 'no-store');
+    return res.json({
+      success: true,
+      projectId: safeProjectId,
+      activity: activityResult.rows.map((row) => ({
+        email: row.email,
+        unlockedAt: row.unlocked_at,
+        updatedAt: row.updated_at,
+        ip: row.last_ip || null,
+        userAgent: row.last_user_agent || null
+      }))
+    });
+  } catch (err) {
+    console.error('Unlock activity fetch failed:', err);
+    return res.status(500).json({ message: 'Unable to load unlock activity.' });
+  }
+});
+
+app.post('/api/projects/:projectId/rotate-pins', async (req, res) => {
+  const safeProjectId = safeSegment(req.params.projectId);
+  if (!safeProjectId) {
+    return res.status(400).json({ message: 'projectId is required.' });
+  }
+  if (!IS_DEV && !isAdminRequest(req)) {
+    return res.status(401).json({ message: 'Admin token required.' });
+  }
+  const ownerScope = IS_DEV ? ADMIN_OWNER_USER_ID : getAdminOwnerScope(req);
+  if (!ownerScope) {
+    return res.status(401).json({ message: 'Admin owner scope is required.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const ownerResult = await client.query(
+      'SELECT data FROM projects WHERE project_id = $1 LIMIT 1',
+      [safeProjectId]
+    );
+    if (ownerResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+    const rowOwner = ownerUserIdFromData(ownerResult.rows[0].data);
+    if (rowOwner !== ownerScope) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+
+    await client.query(
+      `UPDATE pins
+       SET used = true, used_at = NOW()
+       WHERE id IN (
+         SELECT pin.id
+         FROM pins pin
+         JOIN access_records ar ON ar.id = pin.access_id
+         WHERE ar.project_id = $1 AND pin.used = false
+       )`,
+      [safeProjectId]
+    );
+    await client.query(
+      'UPDATE projects SET pin_active_count = 0 WHERE project_id = $1',
+      [safeProjectId]
+    );
+    await client.query('COMMIT');
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, projectId: safeProjectId });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Rotate pins failed:', err);
+    return res.status(500).json({ message: 'Unable to rotate pins.' });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/projects/:projectId/invalidate-sessions', async (req, res) => {
+  const safeProjectId = safeSegment(req.params.projectId);
+  if (!safeProjectId) {
+    return res.status(400).json({ message: 'projectId is required.' });
+  }
+  if (!IS_DEV && !isAdminRequest(req)) {
+    return res.status(401).json({ message: 'Admin token required.' });
+  }
+  const ownerScope = IS_DEV ? ADMIN_OWNER_USER_ID : getAdminOwnerScope(req);
+  if (!ownerScope) {
+    return res.status(401).json({ message: 'Admin owner scope is required.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const ownerResult = await client.query(
+      'SELECT data FROM projects WHERE project_id = $1 LIMIT 1',
+      [safeProjectId]
+    );
+    if (ownerResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+    const rowOwner = ownerUserIdFromData(ownerResult.rows[0].data);
+    if (rowOwner !== ownerScope) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+
+    await client.query('DELETE FROM magic_links WHERE project_id = $1', [safeProjectId]);
+    await client.query('DELETE FROM access_records WHERE project_id = $1', [safeProjectId]);
+    await client.query('UPDATE projects SET pin_unlock_count = 0, pin_active_count = 0 WHERE project_id = $1', [safeProjectId]);
+    await client.query('COMMIT');
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, projectId: safeProjectId });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Invalidate sessions failed:', err);
+    return res.status(500).json({ message: 'Unable to invalidate sessions.' });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/projects/:projectId/reset-counters', async (req, res) => {
+  const safeProjectId = safeSegment(req.params.projectId);
+  if (!safeProjectId) {
+    return res.status(400).json({ message: 'projectId is required.' });
+  }
+  if (!IS_DEV && !isAdminRequest(req)) {
+    return res.status(401).json({ message: 'Admin token required.' });
+  }
+  const ownerScope = IS_DEV ? ADMIN_OWNER_USER_ID : getAdminOwnerScope(req);
+  if (!ownerScope) {
+    return res.status(401).json({ message: 'Admin owner scope is required.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const ownerResult = await client.query(
+      'SELECT data FROM projects WHERE project_id = $1 LIMIT 1',
+      [safeProjectId]
+    );
+    if (ownerResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+    const rowOwner = ownerUserIdFromData(ownerResult.rows[0].data);
+    if (rowOwner !== ownerScope) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+
+    const unlocksResult = await client.query(
+      'SELECT COUNT(*)::int AS unlocked_count FROM access_records WHERE project_id = $1 AND unlocked = true',
+      [safeProjectId]
+    );
+    const activePinsResult = await client.query(
+      `SELECT COUNT(*)::int AS active_count
+       FROM access_records ar
+       JOIN pins pin ON pin.access_id = ar.id
+       WHERE ar.project_id = $1 AND pin.used = false`,
+      [safeProjectId]
+    );
+    const unlockCount = unlocksResult.rows[0]?.unlocked_count || 0;
+    const activeCount = activePinsResult.rows[0]?.active_count || 0;
+
+    await client.query(
+      'UPDATE projects SET pin_unlock_count = $2, pin_active_count = $3 WHERE project_id = $1',
+      [safeProjectId, unlockCount, activeCount]
+    );
+
+    await client.query('COMMIT');
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, projectId: safeProjectId, pinUnlockCount: unlockCount, pinActiveCount: activeCount });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Reset counters failed:', err);
+    return res.status(500).json({ message: 'Unable to reset counters.' });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/projects/:projectId/regenerate-link', async (req, res) => {
+  const safeProjectId = safeSegment(req.params.projectId);
+  if (!safeProjectId) {
+    return res.status(400).json({ message: 'projectId is required.' });
+  }
+  if (!IS_DEV && !isAdminRequest(req)) {
+    return res.status(401).json({ message: 'Admin token required.' });
+  }
+  const ownerScope = IS_DEV ? ADMIN_OWNER_USER_ID : getAdminOwnerScope(req);
+  if (!ownerScope) {
+    return res.status(401).json({ message: 'Admin owner scope is required.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const ownerResult = await client.query(
+      'SELECT data FROM projects WHERE project_id = $1 LIMIT 1',
+      [safeProjectId]
+    );
+    if (ownerResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+    const rowOwner = ownerUserIdFromData(ownerResult.rows[0].data);
+    if (rowOwner !== ownerScope) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+
+    let nextSlug = '';
+    for (let i = 0; i < 5; i += 1) {
+      const candidate = generateProjectSlug();
+      const exists = await client.query(
+        'SELECT 1 FROM projects WHERE slug = $1 LIMIT 1',
+        [candidate]
+      );
+      if (exists.rows.length > 0) {
+        continue;
+      }
+      const updateResult = await client.query(
+        'UPDATE projects SET slug = $2, updated_at = NOW() WHERE project_id = $1 RETURNING slug',
+        [safeProjectId, candidate]
+      );
+      if (updateResult.rows.length > 0) {
+        nextSlug = updateResult.rows[0].slug;
+        break;
+      }
+    }
+
+    if (!nextSlug) {
+      await client.query('ROLLBACK');
+      return res.status(500).json({ message: 'Unable to regenerate slug.' });
+    }
+
+    await client.query('COMMIT');
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, projectId: safeProjectId, slug: nextSlug });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Regenerate link failed:', err);
+    return res.status(500).json({ message: 'Unable to regenerate link.' });
+  } finally {
+    client.release();
   }
 });
 
@@ -2214,7 +2665,11 @@ app.get('/api/pwa/manifest', async (req, res) => {
   return res.send(JSON.stringify(manifest));
 });
 
-app.use('/assets', express.static(path.join(DIST_DIR, 'assets'), { fallthrough: false }));
+app.use('/assets', express.static(path.join(DIST_DIR, 'assets'), {
+  fallthrough: false,
+  maxAge: STATIC_ASSET_MAX_AGE_MS,
+  immutable: true
+}));
 app.get('/sw.js', (req, res) => {
   const swPath = path.join(DIST_DIR, 'sw.js');
   if (!fs.existsSync(swPath)) {
@@ -2250,8 +2705,10 @@ app.get('*', (req, res) => {
 
 const startServer = async () => {
   await ensureSchema();
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+    const serverUrl = APP_URL || `http://localhost:${PORT}`;
+    console.log(`🚀 Server running at ${serverUrl}`);
+    console.log(`Health check: ${serverUrl}/health`);
     console.log(`Serving frontend from ${DIST_DIR} (${hasFrontendBuild() ? 'index.html found' : 'index.html missing'})`);
     console.log(`Process CWD: ${process.cwd()}`);
     if (!process.env.ADMIN_PASSWORD) {

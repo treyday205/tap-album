@@ -45,6 +45,15 @@ export interface Project {
   // Activation Security
   activationPins?: string[];
   usedPins?: string[];
+  // Security V2 (config-only; server enforcement optional)
+  securityMode?: 'open' | 'email' | 'pin' | 'nfc' | 'private';
+  securityUnlockLimit?: number;
+  securityUnlocksPerEmail?: number;
+  securityActivePinLimit?: number;
+  securityPinRequired?: boolean;
+  // Distribution V2 (UI-only controls)
+  distributionMode?: 'open' | 'limited' | 'code' | 'tap';
+  distributionStatus?: 'live' | 'paused' | 'closed';
 }
 
 export interface Track {

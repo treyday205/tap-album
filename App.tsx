@@ -1,16 +1,46 @@
-
-import React, { useEffect } from 'react';
+import React, { useEffect, Suspense, lazy, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { StorageService } from './services/storage';
-import DashboardPage from './pages/DashboardPage';
-import EditorPage from './pages/EditorPage';
-import PublicTAPPage from './pages/PublicTAPPage';
-import LoginPage from './pages/LoginPage';
-import WalletPage from './pages/WalletPage';
+import { API_BASE_URL } from './services/api';
+
+const DashboardPage = lazy(() => import('./pages/DashboardPage'));
+const EditorPage = lazy(() => import('./pages/EditorPage'));
+const PublicTAPPage = lazy(() => import('./pages/PublicTAPPage'));
+const PublicTAPPagePerf = lazy(() => import('./pages/PublicTAPPagePerf'));
+const LoginPage = lazy(() => import('./pages/LoginPage'));
+const WalletPage = lazy(() => import('./pages/WalletPage'));
 
 const isAdminSession = () =>
   Boolean(localStorage.getItem('tap_admin_token')) ||
   localStorage.getItem('tap_is_admin') === 'true';
+
+const isStandaloneDisplay = () => {
+  if (typeof window === 'undefined') return false;
+  return (
+    window.matchMedia('(display-mode: standalone)').matches ||
+    (navigator as any).standalone === true
+  );
+};
+
+const getLastPublicSlug = () => {
+  if (typeof window === 'undefined') return '';
+  const value = localStorage.getItem('tap_last_public_slug');
+  return String(value || '').trim();
+};
+
+const resolvePublicPerfFlag = () => {
+  const envValue = String(import.meta.env?.VITE_PUBLIC_PERF_V2 || '').toLowerCase();
+  const envEnabled = envValue === 'true';
+  const envDisabled = envValue === 'false';
+  const localOverride = typeof window !== 'undefined' ? localStorage.getItem('PUBLIC_PERF_V2') : null;
+  const localEnabled = localOverride === 'true';
+  const localDisabled = localOverride === 'false';
+  if (localEnabled) return true;
+  if (localDisabled) return false;
+  if (envEnabled) return true;
+  if (envDisabled) return false;
+  return false;
+};
 
 const ProtectedRoute = ({ children }: { children?: React.ReactNode }) => {
   const isAdmin = isAdminSession();
@@ -28,51 +58,77 @@ const HomeRoute = () => {
   if (isAdmin) {
     return <Navigate to="/dashboard" replace />;
   }
+  if (isStandaloneDisplay()) {
+    const lastSlug = getLastPublicSlug();
+    if (lastSlug) {
+      return <Navigate to={`/${encodeURIComponent(lastSlug)}`} replace />;
+    }
+  }
   return <LoginPage />;
 };
+
+const PublicTAPRoute = () => {
+  const [usePerf] = useState(resolvePublicPerfFlag);
+  const Page = usePerf ? PublicTAPPagePerf : PublicTAPPage;
+  return <Page />;
+};
+
+const RouteFallback = () => (
+  <div className="min-h-screen bg-slate-950 text-slate-50 flex items-center justify-center px-6">
+    <div className="w-full max-w-md space-y-4">
+      <div className="h-6 w-3/4 bg-slate-800/70 rounded-full animate-pulse" />
+      <div className="h-4 w-full bg-slate-800/50 rounded-full animate-pulse" />
+      <div className="h-4 w-5/6 bg-slate-800/50 rounded-full animate-pulse" />
+      <div className="h-10 w-full bg-slate-800/70 rounded-2xl animate-pulse" />
+    </div>
+  </div>
+);
 
 const App: React.FC = () => {
   useEffect(() => {
     StorageService.init();
+    console.info('[TAP] API base URL:', API_BASE_URL || '(relative)');
   }, []);
 
   return (
     <BrowserRouter>
       <div className="min-h-screen bg-slate-950 text-slate-50 selection:bg-green-500/30">
-        <Routes>
-          {/* Admin Entry Point (Root) */}
-          <Route path="/" element={<HomeRoute />} />
-          
-          {/* Public Album Routes */}
-          <Route path="/:slug" element={<PublicTAPPage />} />
-          <Route path="/:slug/wallet" element={<WalletPage />} />
-          <Route path="/t/:slug" element={<PublicTAPPage />} />
-          <Route path="/t/:slug/wallet" element={<WalletPage />} />
+        <Suspense fallback={<RouteFallback />}>
+          <Routes>
+            {/* Admin Entry Point (Root) */}
+            <Route path="/" element={<HomeRoute />} />
+            
+            {/* Public Album Routes */}
+            <Route path="/:slug" element={<PublicTAPRoute />} />
+            <Route path="/:slug/wallet" element={<WalletPage />} />
+            <Route path="/t/:slug" element={<PublicTAPRoute />} />
+            <Route path="/t/:slug/wallet" element={<WalletPage />} />
 
-          {/* Legacy Admin Path Redirect */}
-          <Route path="/admin" element={<Navigate to="/" replace />} />
+            {/* Legacy Admin Path Redirect */}
+            <Route path="/admin" element={<Navigate to="/" replace />} />
 
-          {/* Administrator Only Routes */}
-          <Route 
-            path="/dashboard" 
-            element={
-              <ProtectedRoute>
-                <DashboardPage />
-              </ProtectedRoute>
-            } 
-          />
-          <Route 
-            path="/dashboard/edit/:projectId" 
-            element={
-              <ProtectedRoute>
-                <EditorPage />
-              </ProtectedRoute>
-            } 
-          />
-          
-          {/* Fallback */}
-          <Route path="*" element={<div className="flex items-center justify-center h-screen font-bold text-slate-500 italic text-center px-6">404 - Area Restricted or Link Expired</div>} />
-        </Routes>
+            {/* Administrator Only Routes */}
+            <Route 
+              path="/dashboard" 
+              element={
+                <ProtectedRoute>
+                  <DashboardPage />
+                </ProtectedRoute>
+              } 
+            />
+            <Route 
+              path="/dashboard/edit/:projectId" 
+              element={
+                <ProtectedRoute>
+                  <EditorPage />
+                </ProtectedRoute>
+              } 
+            />
+            
+            {/* Fallback */}
+            <Route path="*" element={<div className="flex items-center justify-center h-screen font-bold text-slate-500 italic text-center px-6">404 - Area Restricted or Link Expired</div>} />
+          </Routes>
+        </Suspense>
       </div>
     </BrowserRouter>
   );

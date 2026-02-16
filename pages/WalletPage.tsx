@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { StorageService } from '../services/storage';
 import { Project, EventType } from '../types';
@@ -7,11 +7,12 @@ import { Api } from '../services/api';
 import { 
   ChevronLeft, ShieldCheck, Play, Download, 
   Smartphone, CheckCircle2, Loader2, ShieldAlert, 
-  ArrowRight, XCircle, PlusCircle, Share2
+  ArrowRight, XCircle, Share2
 } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 import { isAssetRef, resolveAssetUrl } from '../services/assets';
 import { collectBankRefs, resolveBankUrls } from '../services/assetBank';
+import ResponsiveImage from '../components/ResponsiveImage';
 
 const WalletPage: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
@@ -22,6 +23,8 @@ const WalletPage: React.FC = () => {
   const [isActivated, setIsActivated] = useState(false);
   const [verification, setVerification] = useState<string>('Authenticating signature...');
   const [assetUrls, setAssetUrls] = useState<Record<string, string>>({});
+  const signedCoverRequestsRef = useRef(new Set<string>());
+  const bankCoverRequestsRef = useRef(new Set<string>());
   
   // Activation State
   const [pin, setPin] = useState('');
@@ -63,6 +66,8 @@ const WalletPage: React.FC = () => {
     const signCover = async () => {
       if (!project || !isAssetRef(project.coverImageUrl)) return;
       if (assetUrls[project.coverImageUrl]) return;
+      if (signedCoverRequestsRef.current.has(project.coverImageUrl)) return;
+      signedCoverRequestsRef.current.add(project.coverImageUrl);
       const token = localStorage.getItem('tap_auth_token') || undefined;
       try {
         const response = await Api.signAssets(project.projectId, [project.coverImageUrl], token || undefined);
@@ -74,6 +79,7 @@ const WalletPage: React.FC = () => {
         });
         setAssetUrls(next);
       } catch (err) {
+        signedCoverRequestsRef.current.delete(project.coverImageUrl);
         if (import.meta.env.DEV) {
           console.warn('[DEV] cover signing failed', err);
         }
@@ -81,20 +87,24 @@ const WalletPage: React.FC = () => {
     };
 
     signCover();
-  }, [project]);
+  }, [project, assetUrls]);
 
   useEffect(() => {
     const hydrateBankCover = async () => {
       if (!project) return;
       const refs = collectBankRefs([project.coverImageUrl]);
-      const missing = refs.filter((ref) => !assetUrls[ref]);
+      const missing = refs
+        .filter((ref) => !assetUrls[ref])
+        .filter((ref) => !bankCoverRequestsRef.current.has(ref));
       if (missing.length === 0) return;
+      missing.forEach((ref) => bankCoverRequestsRef.current.add(ref));
       try {
         const resolved = await resolveBankUrls(missing);
         if (Object.keys(resolved).length > 0) {
           setAssetUrls((prev) => ({ ...prev, ...resolved }));
         }
       } catch (err) {
+        missing.forEach((ref) => bankCoverRequestsRef.current.delete(ref));
         if (import.meta.env.DEV) {
           console.warn('[DEV] bank cover hydration failed', err);
         }
@@ -104,7 +114,7 @@ const WalletPage: React.FC = () => {
     hydrateBankCover();
   }, [project, assetUrls]);
 
-  const resolveAsset = (value: string) => resolveAssetUrl(value, assetUrls);
+  const resolveAsset = useCallback((value: string) => resolveAssetUrl(value, assetUrls), [assetUrls]);
 
   const generateVerification = async (p: Project) => {
     try {
@@ -168,7 +178,18 @@ const WalletPage: React.FC = () => {
     setDeferredPrompt(null);
   };
 
-  if (loading || !project) return null;
+  const WalletSkeleton = () => (
+    <div className="min-h-screen bg-black text-white p-6 flex flex-col items-center justify-center animate-pulse">
+      <div className="w-full max-w-sm space-y-6">
+        <div className="h-10 w-2/3 bg-white/10 rounded-full" />
+        <div className="h-64 w-full bg-zinc-900/70 rounded-[2.5rem] border border-zinc-800" />
+        <div className="h-12 w-full bg-zinc-900/70 rounded-[2rem]" />
+      </div>
+    </div>
+  );
+
+  if (loading) return <WalletSkeleton />;
+  if (!project) return null;
 
   const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(window.location.origin + '/' + project.slug)}`;
 
@@ -263,7 +284,14 @@ const WalletPage: React.FC = () => {
               {/* Album Content */}
               <div className="px-8 flex-grow">
                 <div className="aspect-square w-full rounded-3xl overflow-hidden mb-8 border border-white/5 shadow-2xl">
-                  <img src={resolveAsset(project.coverImageUrl)} className="w-full h-full object-cover" alt="Album Art" />
+                  <ResponsiveImage
+                    src={resolveAsset(project.coverImageUrl)}
+                    assetRef={project.coverImageUrl}
+                    className="w-full h-full object-cover"
+                    alt="Album Art"
+                    sizes="(max-width: 640px) 80vw, 360px"
+                    loading="lazy"
+                  />
                 </div>
 
                 <div className="space-y-1 text-center mb-8">

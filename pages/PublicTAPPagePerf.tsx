@@ -1,8 +1,7 @@
-﻿import React, { useState, useEffect, useRef, useCallback } from 'react';
+﻿import React, { useState, useEffect, useRef, useCallback, useMemo, Suspense, lazy } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { StorageService } from '../services/storage';
 import { Project, Track, EventType } from '../types';
-import TAPRenderer from '../components/TAPRenderer';
 import { Api, API_BASE_URL } from '../services/api';
 import { ShieldAlert, Mail, ArrowRight, Loader2, CheckCircle2, XCircle, Key } from 'lucide-react';
 import { collectAssetRefs, resolveAssetUrl, isAssetRef } from '../services/assets';
@@ -14,6 +13,9 @@ import {
   isSupabaseAuthEnabled,
   supabaseAuthClient
 } from '../services/supabaseAuth';
+
+const TAPRenderer = lazy(() => import('../components/TAPRenderer'));
+
 
 const AUTH_TOKEN_KEY = 'tap_auth_token';
 const AUTH_EMAIL_KEY = 'tap_auth_email';
@@ -51,9 +53,15 @@ const PublicTAPPage: React.FC = () => {
         : PWA_ENV_DISABLED
           ? false
           : PWA_DEFAULT;
-  const normalizedPath = location.pathname.replace(/\/+$/, '');
-  const publicSlugPaths = slug ? [`/${slug}`, `/t/${slug}`] : [];
-  const isPublicGoLiveRoute = publicSlugPaths.includes(normalizedPath);
+  const normalizedPath = useMemo(
+    () => location.pathname.replace(/\/+$/, ''),
+    [location.pathname]
+  );
+  const publicSlugPaths = useMemo(() => (slug ? [`/${slug}`, `/t/${slug}`] : []), [slug]);
+  const isPublicGoLiveRoute = useMemo(
+    () => publicSlugPaths.includes(normalizedPath),
+    [publicSlugPaths, normalizedPath]
+  );
 
   const [project, setProject] = useState<Project | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
@@ -61,6 +69,9 @@ const PublicTAPPage: React.FC = () => {
   const [assetUrls, setAssetUrls] = useState<Record<string, string>>({});
   const signedAssetRequestsRef = useRef(new Set<string>());
   const bankAssetRequestsRef = useRef(new Set<string>());
+  const projectFetchRef = useRef<{ slug: string; promise: Promise<void> } | null>(null);
+  const viewLoggedRef = useRef<string | null>(null);
+  const preconnectOriginsRef = useRef(new Set<string>());
   const swRegisteredRef = useRef(false);
   const [isOffline, setIsOffline] = useState(
     typeof navigator !== 'undefined' ? !navigator.onLine : false
@@ -260,12 +271,23 @@ const PublicTAPPage: React.FC = () => {
     };
   }, [PWA_ENABLED, isPublicGoLiveRoute]);
 
-  useEffect(() => {
+    useEffect(() => {
     if (!slug) return;
+    if (projectFetchRef.current?.slug === slug) return;
+
+    let canceled = false;
+
+    const logViewOnce = (projectId: string) => {
+      if (!projectId || viewLoggedRef.current === projectId) return;
+      viewLoggedRef.current = projectId;
+      StorageService.logEvent(projectId, EventType.VIEW, 'Page Load');
+    };
+
     const loadProject = async () => {
       setLoading(true);
       try {
         const response = await Api.getProjectBySlug(slug);
+        if (canceled) return;
         setProject(response.project);
         setTracks(response.tracks || []);
         if (typeof window !== 'undefined' && response?.project?.slug) {
@@ -284,7 +306,7 @@ const PublicTAPPage: React.FC = () => {
             // ignore cache write errors
           }
         }
-        StorageService.logEvent(response.project.projectId, EventType.VIEW, 'Page Load');
+        logViewOnce(response.project.projectId);
         if (IS_DEV) {
           console.log('[DEBUG] project load (api)', {
             projectId: response.project.projectId,
@@ -296,9 +318,10 @@ const PublicTAPPage: React.FC = () => {
       } catch (err) {
         const p = StorageService.getProjectBySlug(slug);
         if (p && p.published) {
+          if (canceled) return;
           setProject(p);
           setTracks(StorageService.getTracks(p.projectId));
-          StorageService.logEvent(p.projectId, EventType.VIEW, 'Page Load');
+          logViewOnce(p.projectId);
           if (typeof window !== 'undefined' && p?.slug) {
             try {
               localStorage.setItem(LAST_PUBLIC_SLUG_KEY, p.slug);
@@ -316,11 +339,22 @@ const PublicTAPPage: React.FC = () => {
           }
         }
       } finally {
-        setLoading(false);
+        if (!canceled) {
+          setLoading(false);
+        }
       }
     };
 
-    loadProject();
+    const promise = loadProject().finally(() => {
+      if (projectFetchRef.current?.slug === slug) {
+        projectFetchRef.current = null;
+      }
+    });
+    projectFetchRef.current = { slug, promise };
+
+    return () => {
+      canceled = true;
+    };
   }, [slug]);
 
   useEffect(() => {
@@ -457,6 +491,29 @@ const PublicTAPPage: React.FC = () => {
 
   const resolveAsset = useCallback((value: string) => resolveAssetUrl(value, assetUrls), [assetUrls]);
 
+  const registerPreconnect = useCallback((target: string) => {
+    if (typeof window === 'undefined') return;
+    const trimmed = String(target || '').trim();
+    if (!trimmed) return;
+    try {
+      const origin = new URL(trimmed, window.location.origin).origin;
+      if (!origin || origin === window.location.origin) return;
+      if (preconnectOriginsRef.current.has(origin)) return;
+      preconnectOriginsRef.current.add(origin);
+      const preconnect = document.createElement('link');
+      preconnect.rel = 'preconnect';
+      preconnect.href = origin;
+      preconnect.crossOrigin = '';
+      document.head.appendChild(preconnect);
+      const dnsPrefetch = document.createElement('link');
+      dnsPrefetch.rel = 'dns-prefetch';
+      dnsPrefetch.href = origin;
+      document.head.appendChild(dnsPrefetch);
+    } catch {
+      // ignore invalid URLs
+    }
+  }, []);
+
   const ensureSignedAssets = async (refs: string[]) => {
     if (!project) return;
     const token = getAuthToken(project.projectId);
@@ -518,6 +575,21 @@ const PublicTAPPage: React.FC = () => {
       ensureBankAssets(bankRefs);
     }
   }, [project, tracks, isUnlocked]);
+
+  useEffect(() => {
+    if (!project || typeof window === 'undefined') return;
+    const candidates: string[] = [];
+    const cover = resolveAsset(project.coverImageUrl || '');
+    if (cover) candidates.push(cover);
+    if (API_BASE_URL && /^https?:\/\//i.test(API_BASE_URL)) {
+      candidates.push(API_BASE_URL);
+    }
+    Object.values(assetUrls)
+      .filter((value) => /^https?:\/\//i.test(String(value || '')))
+      .slice(0, 4)
+      .forEach((value) => candidates.push(String(value)));
+    candidates.forEach((value) => registerPreconnect(value));
+  }, [project?.coverImageUrl, assetUrls, resolveAsset, registerPreconnect]);
 
   const resetModal = () => {
     setVerificationId(null);
@@ -988,16 +1060,44 @@ const PublicTAPPage: React.FC = () => {
     }
   };
 
-  const showInstallButton =
-    PWA_ENABLED && isPublicGoLiveRoute && Boolean(installPromptEvent) && !isStandalone;
-  const showIosInstructions =
-    PWA_ENABLED && isPublicGoLiveRoute && showIosInstall && !isStandalone;
-  const showInstallCard = showIosInstructions;
-  const offlineBanner = isOffline ? (
-    <div className="mx-4 mt-4 rounded-2xl border border-slate-800/70 bg-slate-900/60 px-4 py-3 text-[10px] font-black uppercase tracking-[0.24em] text-slate-400">
-      You&#39;re offline — connect to load album content.
-    </div>
-  ) : null;
+  const showInstallButton = useMemo(
+    () => PWA_ENABLED && isPublicGoLiveRoute && Boolean(installPromptEvent) && !isStandalone,
+    [PWA_ENABLED, isPublicGoLiveRoute, installPromptEvent, isStandalone]
+  );
+  const showIosInstructions = useMemo(
+    () => PWA_ENABLED && isPublicGoLiveRoute && showIosInstall && !isStandalone,
+    [PWA_ENABLED, isPublicGoLiveRoute, showIosInstall, isStandalone]
+  );
+  const showInstallCard = useMemo(
+    () => showIosInstructions,
+    [showIosInstructions]
+  );
+  const offlineBanner = useMemo(
+    () =>
+      isOffline ? (
+        <div className="mx-4 mt-4 rounded-2xl border border-slate-800/70 bg-slate-900/60 px-4 py-3 text-[10px] font-black uppercase tracking-[0.24em] text-slate-400">
+          You&#39;re offline — connect to load album content.
+        </div>
+      ) : null,
+    [isOffline]
+  );
+
+  const tapRendererProps = useMemo(() => {
+    if (!project) return null;
+    return {
+      project,
+      tracks,
+      isPreview: false,
+      showCover: true,
+      showMeta: true,
+      showAllTracks: true,
+      useGoLiveHeader: isPublicGoLiveRoute,
+      resolveAssetUrl: resolveAsset,
+      coverSizes: '(max-width: 480px) 84vw, (max-width: 768px) 72vw, 360px',
+      showInstallButton,
+      onInstallClick: handleInstallClick
+    };
+  }, [project, tracks, isPublicGoLiveRoute, resolveAsset, showInstallButton, handleInstallClick]);
 
   if (loading) {
     return <PublicPageSkeleton />;
@@ -1233,22 +1333,22 @@ const PublicTAPPage: React.FC = () => {
             </div>
           </div>
         )}
-        <TAPRenderer
-          project={project}
-          tracks={tracks}
-          isPreview={false}
-          showCover={true}
-          showMeta={true}
-          showAllTracks={true}
-          useGoLiveHeader={isPublicGoLiveRoute}
-          resolveAssetUrl={resolveAsset}
-          showInstallButton={showInstallButton}
-          onInstallClick={handleInstallClick}
-        />
+        {tapRendererProps && (
+          <Suspense fallback={<PublicPageSkeleton />}>
+            <TAPRenderer {...tapRendererProps} />
+          </Suspense>
+        )}
       </div>
     </div>
   );
 };
 
 export default PublicTAPPage;
+
+
+
+
+
+
+
 

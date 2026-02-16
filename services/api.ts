@@ -1,38 +1,18 @@
-const normalizeEnvBase = (value: unknown): string => {
+const normalizeApiBase = (value: unknown): string => {
   const raw = String(value || '').trim();
   if (!raw) return '';
-  if (raw.startsWith('/')) return raw;
   if (!/^https?:\/\//i.test(raw)) {
-    return `https://${raw}`;
+    return `http://${raw}`.replace(/\/+$/g, '');
   }
-  return raw;
+  return raw.replace(/\/+$/g, '');
 };
 
-const resolveApiBase = (): string => {
-  const envBase = normalizeEnvBase(
-    (process.env as any).API_BASE_URL ||
-      (import.meta as any).env?.API_BASE_URL ||
-      (import.meta as any).env?.VITE_API_BASE_URL ||
-      (import.meta as any).env?.VITE_API_URL
-  );
-  const isProd = Boolean((import.meta as any).env?.PROD) || process.env.NODE_ENV === 'production';
-
-  if (envBase) {
-    const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(envBase);
-    const isRelative = envBase.startsWith('/');
-    if (!isProd || (!isLocalhost && !isRelative)) {
-      return envBase;
-    }
-  }
-
-  if (typeof window !== 'undefined' && window.location?.origin) {
-    return window.location.origin;
-  }
-
-  return isProd ? '' : 'http://localhost:3000';
-};
-
-const API_BASE_URL = resolveApiBase();
+const API = normalizeApiBase(import.meta.env?.VITE_API_URL);
+const API_BASE_URL =
+  API ||
+  (typeof window !== 'undefined' && window.location?.origin
+    ? window.location.origin
+    : '');
 
 const reportUploadTelemetry = async (payload: Record<string, any>) => {
   try {
@@ -45,6 +25,33 @@ const reportUploadTelemetry = async (payload: Record<string, any>) => {
   } catch {
     // best-effort logging
   }
+};
+
+const inflightRequests = new Map<string, Promise<any>>();
+const responseCache = new Map<string, any>();
+
+const cachedRequest = <T,>(key: string, fn: () => Promise<T>): Promise<T> => {
+  if (responseCache.has(key)) {
+    return Promise.resolve(responseCache.get(key) as T);
+  }
+  const inflight = inflightRequests.get(key);
+  if (inflight) return inflight as Promise<T>;
+
+  const promise = fn()
+    .then((data) => {
+      responseCache.set(key, data);
+      return data;
+    })
+    .catch((err) => {
+      responseCache.delete(key);
+      throw err;
+    })
+    .finally(() => {
+      inflightRequests.delete(key);
+    });
+
+  inflightRequests.set(key, promise);
+  return promise;
 };
 
 const request = async (path: string, options: RequestInit = {}) => {
@@ -157,14 +164,16 @@ export const Api = {
     }),
 
   getProjects: (token?: string) =>
-    request('/api/projects', {
-      method: 'GET',
-      headers: token
-        ? {
-            Authorization: `Bearer ${token}`
-          }
-        : undefined
-    }),
+    cachedRequest(`projects:${token || 'public'}`, () =>
+      request('/api/projects', {
+        method: 'GET',
+        headers: token
+          ? {
+              Authorization: `Bearer ${token}`
+            }
+          : undefined
+      })
+    ),
 
   getProjectSecurityStats: (projectId: string, token?: string) =>
     request(`/api/projects/${encodeURIComponent(projectId)}/security-stats`, {
@@ -176,9 +185,59 @@ export const Api = {
         : undefined
     }),
 
+  getUnlockActivity: (projectId: string, token?: string) =>
+    request(`/api/projects/${encodeURIComponent(projectId)}/unlock-activity`, {
+      method: 'GET',
+      headers: token
+        ? {
+            Authorization: `Bearer ${token}`
+          }
+        : undefined
+    }),
+
   getProjectCoverUrl: (projectId: string, token?: string) =>
     request(`/api/projects/${encodeURIComponent(projectId)}/cover-url`, {
       method: 'GET',
+      headers: token
+        ? {
+            Authorization: `Bearer ${token}`
+          }
+        : undefined
+    }),
+
+  rotateProjectPins: (projectId: string, token?: string) =>
+    request(`/api/projects/${encodeURIComponent(projectId)}/rotate-pins`, {
+      method: 'POST',
+      headers: token
+        ? {
+            Authorization: `Bearer ${token}`
+          }
+        : undefined
+    }),
+
+  invalidateProjectSessions: (projectId: string, token?: string) =>
+    request(`/api/projects/${encodeURIComponent(projectId)}/invalidate-sessions`, {
+      method: 'POST',
+      headers: token
+        ? {
+            Authorization: `Bearer ${token}`
+          }
+        : undefined
+    }),
+
+  resetProjectCounters: (projectId: string, token?: string) =>
+    request(`/api/projects/${encodeURIComponent(projectId)}/reset-counters`, {
+      method: 'POST',
+      headers: token
+        ? {
+            Authorization: `Bearer ${token}`
+          }
+        : undefined
+    }),
+
+  regenerateProjectSlug: (projectId: string, token?: string) =>
+    request(`/api/projects/${encodeURIComponent(projectId)}/regenerate-link`, {
+      method: 'POST',
       headers: token
         ? {
             Authorization: `Bearer ${token}`
@@ -198,9 +257,11 @@ export const Api = {
     }),
 
   getProjectBySlug: (slug: string) =>
-    request(`/api/projects/${encodeURIComponent(slug)}`, {
-      method: 'GET'
-    }),
+    cachedRequest(`project:${slug}`, () =>
+      request(`/api/projects/${encodeURIComponent(slug)}`, {
+        method: 'GET'
+      })
+    ),
 
   signAssets: (projectId: string, assetRefs: string[], token?: string) =>
     request('/api/assets/sign', {

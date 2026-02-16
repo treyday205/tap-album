@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Loader2, LogOut, Plus } from 'lucide-react';
 import AlbumCard from '../components/AlbumCard';
@@ -44,6 +44,8 @@ const DashboardPage: React.FC = () => {
   const [assetUrls, setAssetUrls] = useState<Record<string, string>>({});
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
+  const [isLoadingProjects, setIsLoadingProjects] = useState(true);
+  const signedCoverRequestsRef = useRef(new Set<string>());
 
   useEffect(() => {
     const currentUser = StorageService.getCurrentUser();
@@ -74,6 +76,7 @@ const DashboardPage: React.FC = () => {
     };
 
     const hydrateProjectsFromApi = async () => {
+      setIsLoadingProjects(true);
       readLocalProjects();
       try {
         const response = await Api.getProjects(getAdminToken());
@@ -102,6 +105,8 @@ const DashboardPage: React.FC = () => {
         if (import.meta.env.DEV) {
           console.warn('[DEV] projects hydrate failed', err);
         }
+      } finally {
+        setIsLoadingProjects(false);
       }
     };
 
@@ -114,6 +119,8 @@ const DashboardPage: React.FC = () => {
       for (const project of projects) {
         if (!isAssetRef(project.coverImageUrl)) continue;
         if (assetUrls[project.coverImageUrl]) continue;
+        if (signedCoverRequestsRef.current.has(project.coverImageUrl)) continue;
+        signedCoverRequestsRef.current.add(project.coverImageUrl);
         try {
           const token = getAdminToken();
           const response = await Api.signAssets(project.projectId, [project.coverImageUrl], token);
@@ -123,6 +130,7 @@ const DashboardPage: React.FC = () => {
             }
           });
         } catch (err) {
+          signedCoverRequestsRef.current.delete(project.coverImageUrl);
           if (import.meta.env.DEV) {
             console.warn('[DEV] cover signing failed', err);
           }
@@ -292,6 +300,21 @@ const DashboardPage: React.FC = () => {
     }
   };
 
+  const DashboardSkeleton = () => (
+    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 animate-pulse">
+      {[...Array(6)].map((_, index) => (
+        <div key={index} className="bg-slate-900/60 border border-slate-800 rounded-3xl overflow-hidden">
+          <div className="aspect-square w-full bg-slate-800/70" />
+          <div className="p-6 space-y-3">
+            <div className="h-5 w-2/3 bg-slate-800/70 rounded-full" />
+            <div className="h-3 w-1/2 bg-slate-800/50 rounded-full" />
+            <div className="h-10 w-full bg-slate-800/60 rounded-xl" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+
   return (
     <div className="max-w-5xl mx-auto px-6 py-12">
       <header className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-12">
@@ -306,7 +329,9 @@ const DashboardPage: React.FC = () => {
         </div>
       </header>
 
-      {projects.length === 0 ? (
+      {isLoadingProjects ? (
+        <DashboardSkeleton />
+      ) : projects.length === 0 ? (
         <div className="rounded-3xl border border-slate-800 bg-slate-900/40 p-10 text-center">
           <h2 className="text-xl font-black text-white">No albums yet</h2>
           <p className="mt-2 text-sm text-slate-400">Create your first album to start publishing secure TAP links.</p>

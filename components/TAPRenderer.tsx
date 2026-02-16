@@ -1,9 +1,11 @@
-
-import React, { useEffect, useState, useRef } from 'react';
+﻿
+import React, { useEffect, useState, useRef, memo } from 'react';
 import { Music2, Instagram, Twitter, Video, Facebook, Play, Pause } from 'lucide-react';
 import { Project, Track, EventType } from '../types';
 import { StorageService } from '../services/storage';
 import TrackRow from './TrackRow';
+import GoLiveAlbumHeader from './GoLiveAlbumHeader';
+import ResponsiveImage from './ResponsiveImage';
 
 interface TAPRendererProps {
   project: Project;
@@ -12,7 +14,11 @@ interface TAPRendererProps {
   showCover?: boolean;
   showMeta?: boolean;
   showAllTracks?: boolean;
+  coverSizes?: string;
+  useGoLiveHeader?: boolean;
   resolveAssetUrl?: (value: string) => string;
+  showInstallButton?: boolean;
+  onInstallClick?: () => void;
 }
 
 const formatTime = (value: number): string => {
@@ -22,7 +28,19 @@ const formatTime = (value: number): string => {
   return `${mins}:${secs}`;
 };
 
-const TAPRenderer: React.FC<TAPRendererProps> = ({ project, tracks, isPreview = false, showCover = false, showMeta = false, showAllTracks = false, resolveAssetUrl }) => {
+const TAPRenderer: React.FC<TAPRendererProps> = ({
+  project,
+  tracks,
+  isPreview = false,
+  showCover = false,
+  showMeta = false,
+  showAllTracks = false,
+  coverSizes,
+  useGoLiveHeader = false,
+  resolveAssetUrl,
+  showInstallButton = false,
+  onInstallClick
+}) => {
   const [currentlyPlayingTrackId, setCurrentlyPlayingTrackId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -260,29 +278,40 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({ project, tracks, isPreview = 
 
       <div className={`${isPreview ? 'h-full overflow-y-auto scrollbar-hide' : 'flex-1 overflow-y-auto tap-native-scroll pb-44'}`}>
         {!isPreview && showMeta && (
-          <div className="sticky top-0 z-20 px-4 tap-safe-top pb-3 bg-gradient-to-b from-slate-950/95 via-slate-950/90 to-slate-950/70 backdrop-blur-xl border-b border-white/5">
-            <p className="text-[10px] uppercase tracking-[0.35em] font-black text-slate-500">Now Streaming</p>
-            <div className="flex items-end justify-between mt-2">
-              <div className="min-w-0">
-                <h1 className="text-[18px] font-black tracking-tight text-white truncate">{project.title}</h1>
-                <p className="text-[10px] font-black uppercase tracking-[0.3em] text-green-400 mt-1 truncate">{project.artistName}</p>
+          useGoLiveHeader ? (
+            <GoLiveAlbumHeader
+              title={project.title}
+              artist={project.artistName}
+              trackCount={displayTracks.length}
+              showInstallButton={showInstallButton}
+              onInstallClick={onInstallClick}
+            />
+          ) : (
+            <div className="sticky top-0 z-20 px-4 tap-safe-top pb-3 bg-gradient-to-b from-slate-950/95 via-slate-950/90 to-slate-950/70 backdrop-blur-xl border-b border-white/5">
+              <p className="text-[10px] uppercase tracking-[0.35em] font-black text-slate-500">Now Streaming</p>
+              <div className="flex items-end justify-between mt-2">
+                <div className="min-w-0">
+                  <h1 className="text-[18px] font-black tracking-tight text-white truncate">{project.title}</h1>
+                  <p className="text-[10px] font-black uppercase tracking-[0.3em] text-green-400 mt-1 truncate">{project.artistName}</p>
+                </div>
+                <span className="text-[10px] uppercase tracking-[0.28em] font-black text-slate-500 flex-shrink-0 pl-3">{displayTracks.length} tracks</span>
               </div>
-              <span className="text-[10px] uppercase tracking-[0.28em] font-black text-slate-500 flex-shrink-0 pl-3">{displayTracks.length} tracks</span>
             </div>
-          </div>
+          )
         )}
 
         {showCover && (
           <div className={`${isPreview ? 'px-6 pt-8 pb-4' : 'px-4 pt-5 pb-4'} flex justify-center`}>
             <div className={`${isPreview ? 'max-w-[280px] rounded-[2.5rem]' : 'max-w-[360px] rounded-[2.1rem]'} relative aspect-square w-full shadow-[0_30px_70px_rgba(0,0,0,0.7)] overflow-hidden border border-white/10 ring-1 ring-white/5`}>
               {coverSrc ? (
-                <img
+                <ResponsiveImage
                   src={coverSrc}
+                  assetRef={project.coverImageUrl}
                   alt={project.title}
                   className="w-full h-full object-cover"
                   loading={isPreview ? 'lazy' : 'eager'}
                   fetchPriority={isPreview ? 'auto' : 'high'}
-                  decoding="async"
+                  sizes={coverSizes || '(max-width: 640px) 82vw, 360px'}
                 />
               ) : (
                 <div className="w-full h-full bg-slate-900/70" />
@@ -428,4 +457,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({ project, tracks, isPreview = 
   );
 };
 
-export default TAPRenderer;
+export default memo(TAPRenderer);
+
+
+

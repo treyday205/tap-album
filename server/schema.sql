@@ -9,8 +9,16 @@ CREATE TABLE IF NOT EXISTS access_records (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   verified_at TIMESTAMPTZ,
   unlocked_at TIMESTAMPTZ,
+  last_ip TEXT,
+  last_user_agent TEXT,
   UNIQUE (project_id, email)
 );
+
+ALTER TABLE access_records
+  ADD COLUMN IF NOT EXISTS last_ip TEXT;
+
+ALTER TABLE access_records
+  ADD COLUMN IF NOT EXISTS last_user_agent TEXT;
 
 ALTER TABLE access_records
   ALTER COLUMN remaining SET DEFAULT 1000000;

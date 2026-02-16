@@ -1,24 +1,35 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, Suspense, lazy, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { 
-  ChevronLeft, Globe, Music, Link as LinkIcon, 
-  Plus, Trash2, Download, Upload, Camera,
-  Image as ImageIcon, MonitorSmartphone, Sparkles, Loader2,
-  Instagram, Twitter, Video, Facebook, Music2, Play, Pause, AlertTriangle,
-  CheckCircle2, ShieldAlert
+  ChevronLeft, Globe, Music, Link as LinkIcon,
+  Camera, MonitorSmartphone, ShieldAlert
 } from 'lucide-react';
 import { StorageService } from '../services/storage';
 import { Api } from '../services/api';
 import { Project, Track, ProjectLink, LinkCategory } from '../types';
-import TAPRenderer from '../components/TAPRenderer';
 import { GoogleGenAI, Type } from "@google/genai";
 import { collectAssetRefs, isAssetRef, resolveAssetUrl } from '../services/assets';
 import { collectBankRefs, resolveBankUrls, saveBankAsset } from '../services/assetBank';
+import ResponsiveImage from '../components/ResponsiveImage';
+
+const TracklistTab = lazy(() => import('../components/editor/EditorTracklistTab'));
+const LinksTab = lazy(() => import('../components/editor/EditorLinksTab'));
+const SecurityTab = lazy(() => import('../components/editor/EditorSecurityTab'));
+const DistributionV2 = lazy(() => import('../components/editor/EditorDistributionV2'));
+const DevicePreview = lazy(() => import('../components/editor/EditorDevicePreview'));
 
 const EditorPage: React.FC = () => {
   const MAX_TRACKS = 24;
   const DEFAULT_SECURITY_LIMIT = 1_000_000;
+  const SECURITY_V2_ENV =
+    String(import.meta.env?.VITE_SECURITY_V2 || '').toLowerCase() === 'true';
+  const SECURITY_V2_OVERRIDE =
+    typeof window !== 'undefined' ? localStorage.getItem('SECURITY_V2') : null;
+  const SECURITY_V2_OVERRIDE_VALUE =
+    SECURITY_V2_OVERRIDE === 'true' ? true : SECURITY_V2_OVERRIDE === 'false' ? false : null;
+  const SECURITY_V2_ENABLED =
+    SECURITY_V2_OVERRIDE_VALUE ?? SECURITY_V2_ENV;
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
   
@@ -37,10 +48,13 @@ const EditorPage: React.FC = () => {
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [assetUrls, setAssetUrls] = useState<Record<string, string>>({});
+  const signedAssetRequestsRef = useRef(new Set<string>());
+  const bankAssetRequestsRef = useRef(new Set<string>());
   
   const [project, setProject] = useState<Project | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [links, setLinks] = useState<ProjectLink[]>([]);
+  const [isLoadingProject, setIsLoadingProject] = useState(true);
   const [activeTab, setActiveTab] = useState<'general' | 'tracks' | 'links' | 'security'>('general');
   const [isSaved, setIsSaved] = useState(true);
   const [showMobilePreview, setShowMobilePreview] = useState(true);
@@ -68,8 +82,17 @@ const EditorPage: React.FC = () => {
   } | null>(null);
   const [projectSecurityLoading, setProjectSecurityLoading] = useState(false);
   const [projectSecurityError, setProjectSecurityError] = useState<string | null>(null);
+  const [unlockActivity, setUnlockActivity] = useState<Array<{ email: string; unlockedAt: string | null; ip?: string | null; userAgent?: string | null }>>([]);
+  const [unlockActivityLoading, setUnlockActivityLoading] = useState(false);
+  const [unlockActivityError, setUnlockActivityError] = useState<string | null>(null);
   const [syncTick, setSyncTick] = useState(0);
   const syncTimeoutRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (import.meta.env.DEV) {
+      console.log('[DEV] Security tab mode:', SECURITY_V2_ENABLED ? 'V2' : 'V1');
+    }
+  }, [SECURITY_V2_ENABLED]);
 
   const toSafeNonNegativeNumber = (value: unknown, fallback = 0) => {
     const normalized = Number(value);
@@ -109,6 +132,7 @@ const EditorPage: React.FC = () => {
 
   useEffect(() => {
     if (projectId) {
+      setIsLoadingProject(true);
       const p = StorageService.getProjectById(projectId);
       if (p) {
         setProject(p);
@@ -117,6 +141,7 @@ const EditorPage: React.FC = () => {
       } else {
         navigate('/dashboard');
       }
+      setIsLoadingProject(false);
     }
   }, [projectId, navigate]);
 
@@ -166,12 +191,46 @@ const EditorPage: React.FC = () => {
       .finally(() => setAccessLoading(false));
   }, [activeTab, project?.projectId, syncTick]);
 
-  const resolveAsset = (value: string) => resolveAssetUrl(value, assetUrls);
+  const handleRetrySecurityStats = () => {
+    setProjectSecurityError(null);
+    setProjectSecurityStats(null);
+    setSyncTick((tick) => tick + 1);
+  };
+
+  const handleRetryAccessStatus = () => {
+    setAccessError(null);
+    setAccessStatus(null);
+    setSyncTick((tick) => tick + 1);
+  };
+
+  useEffect(() => {
+    if (!SECURITY_V2_ENABLED || activeTab !== 'security' || !project) return;
+    const adminToken = localStorage.getItem('tap_admin_token') || undefined;
+    if (!adminToken && !import.meta.env.DEV) {
+      setUnlockActivityError('Admin token required to load unlock activity.');
+      setUnlockActivity([]);
+      return;
+    }
+    setUnlockActivityLoading(true);
+    setUnlockActivityError(null);
+    Api.getUnlockActivity(project.projectId, adminToken)
+      .then((data) => setUnlockActivity(Array.isArray(data?.activity) ? data.activity : []))
+      .catch((err) => {
+        setUnlockActivity([]);
+        setUnlockActivityError(err.message || 'Unable to load unlock activity.');
+      })
+      .finally(() => setUnlockActivityLoading(false));
+  }, [SECURITY_V2_ENABLED, activeTab, project?.projectId, syncTick]);
+
+  const resolveAsset = useCallback((value: string) => resolveAssetUrl(value, assetUrls), [assetUrls]);
 
   const ensureSignedAssets = async (refs: string[]) => {
     if (!project) return;
-    const missing = refs.filter((ref) => isAssetRef(ref) && !assetUrls[ref]);
+    const missing = refs
+      .filter((ref) => isAssetRef(ref) && !assetUrls[ref])
+      .filter((ref) => !signedAssetRequestsRef.current.has(ref));
     if (missing.length === 0) return;
+    missing.forEach((ref) => signedAssetRequestsRef.current.add(ref));
     try {
       const token =
         localStorage.getItem('tap_admin_token') ||
@@ -186,6 +245,7 @@ const EditorPage: React.FC = () => {
       });
       setAssetUrls(next);
     } catch (err) {
+      missing.forEach((ref) => signedAssetRequestsRef.current.delete(ref));
       if (import.meta.env.DEV) {
         console.warn('[DEV] asset signing failed', err);
       }
@@ -193,14 +253,18 @@ const EditorPage: React.FC = () => {
   };
 
   const ensureBankAssets = async (refs: string[]) => {
-    const missing = refs.filter((ref) => !assetUrls[ref]);
+    const missing = refs
+      .filter((ref) => !assetUrls[ref])
+      .filter((ref) => !bankAssetRequestsRef.current.has(ref));
     if (missing.length === 0) return;
+    missing.forEach((ref) => bankAssetRequestsRef.current.add(ref));
     try {
       const resolved = await resolveBankUrls(missing);
       if (Object.keys(resolved).length > 0) {
         setAssetUrls((prev) => ({ ...prev, ...resolved }));
       }
     } catch (err) {
+      missing.forEach((ref) => bankAssetRequestsRef.current.delete(ref));
       if (import.meta.env.DEV) {
         console.warn('[DEV] bank asset resolution failed', err);
       }
@@ -307,6 +371,57 @@ const EditorPage: React.FC = () => {
       StorageService.saveProject(updated);
       setIsSaved(false);
       setTimeout(() => setIsSaved(true), 1500);
+    }
+  };
+
+  const handleInvalidateSessions = async () => {
+    if (!project) return;
+    if (!confirm('Invalidate all sessions and clear unlock records for this album?')) return;
+    try {
+      const token = localStorage.getItem('tap_admin_token') || undefined;
+      await Api.invalidateProjectSessions(project.projectId, token);
+      setSyncTick((tick) => tick + 1);
+    } catch (err: any) {
+      alert(err?.message || 'Unable to invalidate sessions.');
+    }
+  };
+
+  const handleResetCounters = async () => {
+    if (!project) return;
+    if (!confirm('Reset unlock and active PIN counters?')) return;
+    try {
+      const token = localStorage.getItem('tap_admin_token') || undefined;
+      await Api.resetProjectCounters(project.projectId, token);
+      setSyncTick((tick) => tick + 1);
+    } catch (err: any) {
+      alert(err?.message || 'Unable to reset counters.');
+    }
+  };
+
+  const handleRotatePins = async () => {
+    if (!project) return;
+    if (!confirm('Rotate PINs and invalidate all active pins?')) return;
+    try {
+      const token = localStorage.getItem('tap_admin_token') || undefined;
+      await Api.rotateProjectPins(project.projectId, token);
+      setSyncTick((tick) => tick + 1);
+    } catch (err: any) {
+      alert(err?.message || 'Unable to rotate pins.');
+    }
+  };
+
+  const handleRegenerateLink = async () => {
+    if (!project) return;
+    if (!confirm('Regenerate secure link (album slug)? This will change the public URL.')) return;
+    try {
+      const token = localStorage.getItem('tap_admin_token') || undefined;
+      const response = await Api.regenerateProjectSlug(project.projectId, token);
+      if (response?.slug) {
+        handleSaveProject({ slug: response.slug });
+      }
+      setSyncTick((tick) => tick + 1);
+    } catch (err: any) {
+      alert(err?.message || 'Unable to regenerate link.');
     }
   };
 
@@ -710,6 +825,35 @@ const EditorPage: React.FC = () => {
     if (link) StorageService.saveLink(link);
   };
 
+  const EditorSkeleton = () => (
+    <div className="min-h-screen bg-slate-950 text-slate-100 px-6 py-10 animate-pulse">
+      <div className="h-8 w-64 bg-slate-800/70 rounded-full mb-6" />
+      <div className="h-4 w-48 bg-slate-800/50 rounded-full mb-10" />
+      <div className="grid gap-6">
+        <div className="h-48 bg-slate-900/60 rounded-3xl border border-slate-800/50" />
+        <div className="h-56 bg-slate-900/60 rounded-3xl border border-slate-800/50" />
+        <div className="h-40 bg-slate-900/60 rounded-3xl border border-slate-800/50" />
+      </div>
+    </div>
+  );
+
+  const TabSkeleton = () => (
+    <div className="space-y-4 animate-pulse pb-12">
+      <div className="h-6 w-40 bg-slate-800/60 rounded-full" />
+      <div className="h-24 bg-slate-900/60 rounded-3xl border border-slate-800/50" />
+      <div className="h-24 bg-slate-900/60 rounded-3xl border border-slate-800/50" />
+      <div className="h-24 bg-slate-900/60 rounded-3xl border border-slate-800/50" />
+    </div>
+  );
+
+  const DevicePreviewSkeleton = () => (
+    <div className="relative hidden lg:flex flex-col w-[440px] p-10 items-center justify-center sticky top-0 h-[calc(100vh-73px)]">
+      <div className="mb-6 h-3 w-40 bg-slate-800/60 rounded-full animate-pulse" />
+      <div className="w-[300px] h-[600px] bg-slate-900/70 rounded-[50px] border border-slate-800/60 animate-pulse" />
+    </div>
+  );
+
+  if (isLoadingProject) return <EditorSkeleton />;
   if (!project) return null;
 
   return (
@@ -766,7 +910,14 @@ const EditorPage: React.FC = () => {
                   <h2 className="text-xl font-black mb-6">Album Visuals</h2>
                   <div className="flex flex-col md:flex-row gap-8">
                     <div onClick={() => triggerFileUpload('PROJECT_IMAGE')} className="group relative w-48 h-48 bg-slate-800 rounded-3xl overflow-hidden cursor-pointer border-2 border-dashed border-slate-700 hover:border-green-500 transition-all flex-shrink-0">
-                      <img src={resolveAsset(project.coverImageUrl || '')} alt="Album Art" className="w-full h-full object-cover group-hover:opacity-40 transition-opacity" />
+                      <ResponsiveImage
+                        src={resolveAsset(project.coverImageUrl || '')}
+                        assetRef={project.coverImageUrl}
+                        alt="Album Art"
+                        className="w-full h-full object-cover group-hover:opacity-40 transition-opacity"
+                        sizes="(max-width: 768px) 40vw, 192px"
+                        loading="lazy"
+                      />
                       <div className="absolute inset-0 flex flex-col items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-white">
                         <Camera size={24} className="mb-2" />
                         <span className="text-[10px] font-black uppercase tracking-widest">Album Art</span>
@@ -814,313 +965,80 @@ const EditorPage: React.FC = () => {
             )}
 
             {activeTab === 'tracks' && (
-              <div className="space-y-6 pb-24 animate-in fade-in duration-300">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-xl font-black">Tracklist</h2>
-                  <button onClick={handleAddTrack} className="flex items-center gap-2 bg-green-500 hover:bg-green-400 text-black font-black py-2.5 px-6 rounded-full transition-all text-xs uppercase tracking-widest">
-                    <Plus size={16} strokeWidth={3} />
-                    Add New Song
-                  </button>
-                </div>
-                {tracks.map((track) => {
-                  const isUploading = uploadingTrackId === track.trackId;
-                  const uploadPercent = uploadProgress[track.trackId] ?? 0;
-                  const isSecureAudio = isAssetRef(track.mp3Url);
-                  const isBankAudio = track.mp3Url.startsWith('bank:');
-                  const displayMp3Value = track.mp3Url.startsWith('data:')
-                    ? 'Local Audio File'
-                    : isBankAudio
-                      ? 'Local Audio File'
-                    : isSecureAudio
-                      ? 'Secure Audio File'
-                      : track.mp3Url;
-                  return (
-                  <div key={track.trackId} className="bg-slate-900/40 p-5 rounded-3xl border border-slate-800/50 flex gap-6 group hover:border-slate-700 transition-all">
-                    <div onClick={() => triggerFileUpload('TRACK_IMAGE', track.trackId)} className="w-20 h-20 bg-slate-800 rounded-2xl flex-shrink-0 cursor-pointer overflow-hidden border border-slate-700 relative group">
-                      <img
-                        src={resolveAsset(track.artworkUrl || '') || resolveAsset(project.coverImageUrl || '')}
-                        className="w-full h-full object-cover group-hover:opacity-40 transition-opacity"
-                        alt="Song Art"
-                      />
-                      <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                        <ImageIcon size={20} className="text-white" />
-                      </div>
-                    </div>
-                    <div className="flex-grow space-y-4">
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <input type="text" value={track.title} onChange={(e) => handleUpdateTrack(track.trackId, { title: e.target.value })} placeholder="Song Title" className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-green-500" />
-                        <div className="flex gap-2">
-                          <input
-                            type="text"
-                            value={displayMp3Value}
-                            onChange={(e) => handleUpdateTrack(track.trackId, { mp3Url: e.target.value })}
-                            disabled={track.mp3Url.startsWith('data:') || isBankAudio || isSecureAudio || isUploading}
-                            placeholder="Audio URL or Spotify Link"
-                            className="flex-1 bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-2 text-sm focus:outline-none"
-                          />
-                          <button onClick={() => triggerFileUpload('TRACK_AUDIO', track.trackId)} disabled={isUploading} className={`p-2 rounded-xl transition-colors ${isUploading ? 'bg-slate-900 text-slate-600' : 'bg-slate-800 hover:bg-slate-700 text-slate-400'}`}>
-                            {isUploading ? <Loader2 size={18} className="animate-spin" /> : <Upload size={18} />}
-                          </button>
-                        </div>
-                      </div>
-                      {isUploading && (
-                        <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">
-                          Uploading {uploadPercent}%
-                        </div>
-                      )}
-                      <div className="flex items-center justify-between">
-                        <div className="flex gap-2">
-                          {track.mp3Url && (
-                            <>
-                              <button onClick={() => togglePreview(track)} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${previewingTrackId === track.trackId && isPlayingPreview ? 'bg-red-500 text-white' : 'bg-green-500/10 text-green-400 hover:bg-green-500/20'}`}>
-                                {previewingTrackId === track.trackId && isPlayingPreview ? <Pause size={12} /> : <Play size={12} />}
-                                {previewingTrackId === track.trackId && isPlayingPreview ? 'Stop' : 'Preview'}
-                              </button>
-                              <button 
-                                onClick={() => handleDownloadTrack(track)} 
-                                disabled={downloadingTrackId === track.trackId}
-                                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${downloadSuccessId === track.trackId ? 'bg-green-500/20 text-green-500' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}
-                              >
-                                {downloadingTrackId === track.trackId ? <Loader2 size={12} className="animate-spin" /> : downloadSuccessId === track.trackId ? <CheckCircle2 size={12} /> : <Download size={12} />}
-                                {downloadSuccessId === track.trackId ? 'Saved' : 'Save MP3'}
-                              </button>
-                            </>
-                          )}
-                          {!track.mp3Url.startsWith('data:') && !isSecureAudio && track.mp3Url && (
-                            <button onClick={() => handleMagicResolve(track)} className="p-1.5 bg-slate-800 text-green-400 rounded-lg hover:bg-slate-700 transition-colors" title="Magic Resolve">
-                              {resolvingTrackId === track.trackId ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                            </button>
-                          )}
-                        </div>
-                        <button onClick={() => handleDeleteTrack(track.trackId)} className="p-2 text-slate-700 hover:text-red-500 transition-colors"><Trash2 size={18} /></button>
-                      </div>
-                    </div>
-                  </div>
-                )})}
-              </div>
+              <Suspense fallback={<TabSkeleton />}>
+                <TracklistTab
+                  project={project}
+                  tracks={tracks}
+                  uploadingTrackId={uploadingTrackId}
+                  uploadProgress={uploadProgress}
+                  previewingTrackId={previewingTrackId}
+                  isPlayingPreview={isPlayingPreview}
+                  downloadingTrackId={downloadingTrackId}
+                  downloadSuccessId={downloadSuccessId}
+                  resolvingTrackId={resolvingTrackId}
+                  handleAddTrack={handleAddTrack}
+                  handleUpdateTrack={handleUpdateTrack}
+                  triggerFileUpload={triggerFileUpload}
+                  togglePreview={togglePreview}
+                  handleDownloadTrack={handleDownloadTrack}
+                  handleMagicResolve={handleMagicResolve}
+                  handleDeleteTrack={handleDeleteTrack}
+                  resolveAsset={resolveAsset}
+                />
+              </Suspense>
             )}
 
             {activeTab === 'security' && (
-              <div className="space-y-8 animate-in fade-in duration-300 pb-10">
-                <section className="bg-slate-900/40 p-6 rounded-3xl border border-slate-800/50">
-                  <div className="flex items-center justify-between mb-6">
-                    <div>
-                      <h2 className="text-xl font-black flex items-center gap-2">
-                        <ShieldAlert size={20} className="text-green-500" />
-                        Email Gate
-                      </h2>
-                      <p className="text-xs text-slate-500 font-bold uppercase tracking-widest mt-1">Email verification + single PIN unlock</p>
-                    </div>
-                    <div className="text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-full bg-green-500/10 text-green-400 border border-green-500/20">
-                      Active
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/50">
-                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">PIN Allowance</p>
-                      <p className="text-sm font-bold text-slate-100">1,000,000 uses per email</p>
-                      <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-2">
-                        Count decreases only after a successful PIN unlock.
-                      </p>
-                    </div>
-                    <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/50">
-                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Album Unlock Capacity</p>
-                      <p className="text-sm font-bold text-slate-100">1,000,000 active unlocks per album</p>
-                      <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-2">
-                        Each verified email unlock is counted per project and does not reduce other emails.
-                      </p>
-                    </div>
-                    <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/50">
-                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Album Active PIN Capacity</p>
-                      <p className="text-sm font-bold text-slate-100">1,000,000 active PINs per album</p>
-                      <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-2">
-                        Concurrent active PIN issuance is isolated per project and does not impact other albums.
-                      </p>
-                    </div>
-                  </div>
-                </section>
-
-                <section className="p-6 bg-slate-900/40 rounded-3xl border border-slate-800/50">
-                  <div className="flex items-center justify-between mb-4">
-                    <h4 className="text-xs font-black uppercase tracking-widest text-green-500">Album Security Stats</h4>
-                    {projectSecurityLoading && <Loader2 size={16} className="animate-spin text-slate-400" />}
-                  </div>
-
-                  {projectSecurityError && (
-                    <div className="flex items-center gap-2 text-red-400 text-[10px] font-black uppercase tracking-widest mb-3">
-                      <AlertTriangle size={14} />
-                      {projectSecurityError}
-                    </div>
-                  )}
-
-                  {effectiveProjectSecurityStats ? (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
-                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album Unlocks Used</p>
-                        <p className="text-sm font-bold text-white">
-                          {effectiveProjectSecurityStats.pinUnlockUsed.toLocaleString()}
-                        </p>
-                      </div>
-                      <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
-                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album Unlocks Remaining</p>
-                        <p className="text-sm font-bold text-white">
-                          {effectiveProjectSecurityStats.pinUnlockRemaining.toLocaleString()}
-                        </p>
-                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-2">
-                          Limit: {effectiveProjectSecurityStats.pinUnlockLimit.toLocaleString()}
-                        </p>
-                      </div>
-                      <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
-                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album Active PINs Used</p>
-                        <p className="text-sm font-bold text-white">
-                          {effectiveProjectSecurityStats.pinActiveUsed.toLocaleString()}
-                        </p>
-                      </div>
-                      <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
-                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album Active PINs Remaining</p>
-                        <p className="text-sm font-bold text-white">
-                          {effectiveProjectSecurityStats.pinActiveRemaining.toLocaleString()}
-                        </p>
-                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-2">
-                          Limit: {effectiveProjectSecurityStats.pinActiveLimit.toLocaleString()}
-                        </p>
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">
-                      Album security stats are unavailable for this project.
-                    </p>
-                  )}
-                </section>
-
-                <section className="p-6 bg-slate-900/40 rounded-3xl border border-slate-800/50">
-                  <h4 className="text-xs font-black uppercase tracking-widest text-green-500 mb-4">Current Email Status</h4>
-                  {!localStorage.getItem('tap_auth_token') && (
-                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">
-                      No verified email on this device yet.
-                    </p>
-                  )}
-
-                  {localStorage.getItem('tap_auth_token') && (
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
-                        <div>
-                          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Email</p>
-                          <p className="text-sm font-bold text-white">{localStorage.getItem('tap_auth_email') || 'Unknown'}</p>
-                        </div>
-                        {accessLoading && <Loader2 size={16} className="animate-spin text-slate-400" />}
-                      </div>
-
-                      {accessError && (
-                        <div className="flex items-center gap-2 text-red-400 text-[10px] font-black uppercase tracking-widest">
-                          <AlertTriangle size={14} />
-                          {accessError}
-                        </div>
-                      )}
-
-                      {accessStatus && (
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                          <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
-                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Verified</p>
-                            <p className={`text-sm font-bold ${accessStatus.verified ? 'text-green-400' : 'text-slate-400'}`}>
-                              {accessStatus.verified ? 'Yes' : 'No'}
-                            </p>
-                          </div>
-                          <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
-                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Unlocked</p>
-                            <p className={`text-sm font-bold ${accessStatus.unlocked ? 'text-green-400' : 'text-slate-400'}`}>
-                              {accessStatus.unlocked ? 'Yes' : 'No'}
-                            </p>
-                          </div>
-                          <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
-                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Remaining Uses</p>
-                            <p className="text-sm font-bold text-white">{accessStatus.remaining}</p>
-                          </div>
-                          <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700">
-                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Active PIN</p>
-                            <p className={`text-sm font-bold ${accessStatus.hasActivePin ? 'text-green-400' : 'text-slate-400'}`}>
-                              {accessStatus.hasActivePin ? 'Issued' : 'None'}
-                            </p>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </section>
-              </div>
+              <Suspense fallback={<TabSkeleton />}>
+                {SECURITY_V2_ENABLED ? (
+                  <DistributionV2
+                    project={project}
+                    projectSecurityLoading={projectSecurityLoading}
+                    projectSecurityError={projectSecurityError}
+                    effectiveProjectSecurityStats={effectiveProjectSecurityStats}
+                    unlockActivity={unlockActivity}
+                    unlockActivityLoading={unlockActivityLoading}
+                    unlockActivityError={unlockActivityError}
+                    onSaveProject={handleSaveProject}
+                    onResetCounters={handleResetCounters}
+                    onRotatePins={handleRotatePins}
+                  />
+                ) : (
+                  <SecurityTab
+                    projectSecurityLoading={projectSecurityLoading}
+                    projectSecurityError={projectSecurityError}
+                    effectiveProjectSecurityStats={effectiveProjectSecurityStats}
+                    accessStatus={accessStatus}
+                    accessLoading={accessLoading}
+                    accessError={accessError}
+                    authEmail={localStorage.getItem('tap_auth_email')}
+                    hasAuthToken={Boolean(localStorage.getItem('tap_auth_token'))}
+                    onRetrySecurityStats={handleRetrySecurityStats}
+                    onRetryAccessStatus={handleRetryAccessStatus}
+                  />
+                )}
+              </Suspense>
             )}
 
             {activeTab === 'links' && (
-              <div className="space-y-10 pb-10 animate-in fade-in duration-300">
-                <section className="bg-slate-900/40 p-6 rounded-3xl border border-slate-800/50">
-                  <h2 className="text-xl font-black mb-6">Commerce Badges</h2>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div>
-                      <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Tickets URL</label>
-                      <input type="text" placeholder="https://..." value={project.ticketsUrl || ''} onChange={(e) => handleSaveProject({ ticketsUrl: e.target.value })} className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-green-500 text-white" />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Merch Store URL</label>
-                      <input type="text" placeholder="https://..." value={project.merchUrl || ''} onChange={(e) => handleSaveProject({ merchUrl: e.target.value })} className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-green-500 text-white" />
-                    </div>
-                  </div>
-                </section>
-
-                <section className="bg-slate-900/40 p-6 rounded-3xl border border-slate-800/50">
-                  <h2 className="text-xl font-black mb-6">Social Badge Profiles</h2>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    {[
-                      { key: 'instagramUrl', label: 'Instagram', icon: <Instagram size={18} />, color: 'text-pink-500' },
-                      { key: 'twitterUrl', label: 'Twitter', icon: <Twitter size={18} />, color: 'text-blue-400' },
-                      { key: 'tiktokUrl', label: 'TikTok', icon: <Music2 size={18} />, color: 'text-white' },
-                      { key: 'youtubeUrl', label: 'YouTube', icon: <Video size={18} />, color: 'text-red-500' },
-                      { key: 'facebookUrl', label: 'Facebook', icon: <Facebook size={18} />, color: 'text-blue-600' }
-                    ].map(social => (
-                      <div key={social.key} className="flex items-center gap-3">
-                        <div className={`p-2 bg-slate-800 rounded-lg ${social.color}`}>{social.icon}</div>
-                        <input type="text" placeholder={`${social.label} handle or URL`} value={(project as any)[social.key] || ''} onChange={(e) => handleSaveProject({ [social.key]: e.target.value })} className="flex-1 bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-green-500 text-white" />
-                      </div>
-                    ))}
-                  </div>
-                </section>
-
-                <section className="bg-slate-900/40 p-6 rounded-3xl border border-slate-800/50">
-                  <div className="flex items-center justify-between mb-6">
-                    <h2 className="text-xl font-black">Streaming & Deep Links</h2>
-                    <div className="flex gap-2">
-                      <button onClick={() => handleAddLink(LinkCategory.STREAMING)} className="p-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-green-400 transition-colors"><Music size={16} /></button>
-                      <button onClick={() => handleAddLink(LinkCategory.OTHER)} className="p-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-slate-400 transition-colors"><Plus size={16} /></button>
-                    </div>
-                  </div>
-                  <div className="space-y-3">
-                    {links.map(link => (
-                      <div key={link.linkId} className="flex items-center gap-3 bg-slate-800/30 p-3 rounded-2xl border border-slate-800/50">
-                        <input type="text" value={link.label} onChange={(e) => handleUpdateLink(link.linkId, { label: e.target.value })} className="w-1/3 bg-transparent text-sm font-bold focus:outline-none" />
-                        <input type="text" value={link.url} onChange={(e) => handleUpdateLink(link.linkId, { url: e.target.value })} className="flex-1 bg-transparent text-sm text-slate-400 focus:outline-none" />
-                        <button onClick={() => handleDeleteLink(link.linkId)} className="p-1.5 text-slate-700 hover:text-red-500 transition-colors"><Trash2 size={16} /></button>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              </div>
+              <Suspense fallback={<TabSkeleton />}>
+                <LinksTab
+                  project={project}
+                  links={links}
+                  handleAddLink={handleAddLink}
+                  handleUpdateLink={handleUpdateLink}
+                  handleDeleteLink={handleDeleteLink}
+                  handleSaveProject={handleSaveProject}
+                />
+              </Suspense>
             )}
           </div>
         </div>
 
         {showMobilePreview && (
-          <div className="relative hidden lg:flex flex-col w-[440px] p-10 items-center justify-center sticky top-0 h-[calc(100vh-73px)] bg-[radial-gradient(ellipse_at_top,_rgba(34,197,94,0.12),_transparent_55%)] overflow-hidden">
-            <div className="pointer-events-none absolute -top-10 left-1/2 -translate-x-1/2 w-72 h-72 bg-green-500/10 blur-3xl rounded-full"></div>
-            <div className="pointer-events-none absolute bottom-8 left-1/2 -translate-x-1/2 w-72 h-20 bg-white/5 blur-2xl rounded-full"></div>
-            <div className="mb-6 text-[10px] uppercase tracking-[0.4em] font-black text-slate-600">Device Preview</div>
-            <div className="relative w-[300px] h-[600px] bg-slate-950/95 rounded-[50px] border-[8px] border-slate-800/80 shadow-[0_40px_90px_rgba(0,0,0,0.7)] overflow-hidden flex flex-col scale-105 ring-1 ring-slate-800/60">
-              <div className="absolute top-0 left-1/2 -translate-x-1/2 w-28 h-5 bg-slate-800/90 rounded-b-2xl z-40"></div>
-              <div className="absolute top-6 left-1/2 -translate-x-1/2 w-16 h-1 bg-slate-800/70 rounded-full"></div>
-              <div className="flex-1 overflow-hidden">
-                <TAPRenderer project={project} tracks={tracks} isPreview={true} showCover={true} resolveAssetUrl={resolveAsset} />
-              </div>
-            </div>
-          </div>
+          <Suspense fallback={<DevicePreviewSkeleton />}>
+            <DevicePreview project={project} tracks={tracks} resolveAssetUrl={resolveAsset} />
+          </Suspense>
         )}
       </div>
 

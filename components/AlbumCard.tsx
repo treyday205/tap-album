@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, memo } from 'react';
 import { Eye, ImageOff, Settings, ShieldCheck, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { Project } from '../types';
+import ResponsiveImage from './ResponsiveImage';
 
 type CoverStatus = 'loading' | 'ready' | 'missing';
 
@@ -84,14 +85,17 @@ const AlbumCard: React.FC<AlbumCardProps> = ({
           </div>
         )}
         {hasCoverReference && effectiveSrc && (
-          <img
+          <ResponsiveImage
             src={effectiveSrc}
+            assetRef={project.coverImageUrl}
             alt={project.title}
             onLoad={handleImageLoad}
             onError={handleImageError}
             className={`w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 ${
               coverStatus === 'ready' ? 'opacity-100' : 'opacity-0'
             }`}
+            sizes="(max-width: 768px) 90vw, (max-width: 1280px) 33vw, 320px"
+            loading="lazy"
           />
         )}
         {coverStatus === 'loading' && (
@@ -145,4 +149,4 @@ const AlbumCard: React.FC<AlbumCardProps> = ({
   );
 };
 
-export default AlbumCard;
+export default memo(AlbumCard);

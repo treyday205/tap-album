@@ -1,5 +1,5 @@
 
-import React from 'react';
+import React, { memo } from 'react';
 import { Play, Pause } from 'lucide-react';
 import { Track } from '../types';
 
@@ -118,4 +118,4 @@ const TrackRow: React.FC<TrackRowProps> = ({ track, artworkUrl = '', trackNumber
   );
 };
 
-export default TrackRow;
+export default memo(TrackRow);
