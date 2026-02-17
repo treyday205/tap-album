@@ -14,6 +14,10 @@ const ADMIN_ENTRY_PATH = '/control-admin';
 const ADMIN_DASHBOARD_PATH = '/control-admin/dashboard';
 const ADMIN_EDITOR_BASE_PATH = '/control-admin/dashboard/edit';
 const DEFAULT_ADMIN_ROOT_HOSTS = 'tap-album-production-bfdb.up.railway.app';
+const PUBLIC_SITE_ENABLED =
+  String(import.meta.env?.VITE_PUBLIC_SITE_ENABLED || 'false').toLowerCase() === 'true';
+const PUBLIC_ALBUM_ENABLED =
+  String(import.meta.env?.VITE_PUBLIC_ALBUM_ENABLED || 'true').toLowerCase() === 'true';
 
 const isAdminSession = () =>
   Boolean(localStorage.getItem('tap_admin_token')) ||
@@ -93,6 +97,9 @@ const LegacyDashboardEditRoute = () => {
 };
 
 const RootEntryRoute = () => {
+  if (!PUBLIC_SITE_ENABLED) {
+    return <AdminEntryRoute />;
+  }
   if (isStandalonePwa()) {
     return <LandingPage />;
   }
@@ -103,6 +110,9 @@ const RootEntryRoute = () => {
 };
 
 const FeaturesRoute = () => {
+  if (!PUBLIC_SITE_ENABLED) {
+    return <Navigate to={ADMIN_ENTRY_PATH} replace />;
+  }
   if (shouldUseAdminRoot()) {
     return <Navigate to="/" replace />;
   }
@@ -110,6 +120,9 @@ const FeaturesRoute = () => {
 };
 
 const PublicTAPRoute = () => {
+  if (!PUBLIC_ALBUM_ENABLED) {
+    return <Navigate to={ADMIN_ENTRY_PATH} replace />;
+  }
   const [usePerf] = useState(resolvePublicPerfFlag);
   const Page = usePerf ? PublicTAPPagePerf : PublicTAPPage;
   return <Page />;
