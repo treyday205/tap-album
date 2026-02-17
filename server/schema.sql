@@ -39,6 +39,51 @@ WHERE a.project_id = b.project_id
 CREATE UNIQUE INDEX IF NOT EXISTS idx_access_records_project_email_unique
   ON access_records (project_id, email);
 
+CREATE TABLE IF NOT EXISTS project_email_unlocks (
+  project_id TEXT NOT NULL,
+  email_normalized TEXT NOT NULL,
+  email TEXT NOT NULL,
+  verified_at TIMESTAMPTZ,
+  unlocks_used INTEGER NOT NULL DEFAULT 0,
+  last_unlock_at TIMESTAMPTZ,
+  per_email_limit INTEGER,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_ip TEXT,
+  last_user_agent TEXT,
+  PRIMARY KEY (project_id, email_normalized)
+);
+
+ALTER TABLE project_email_unlocks
+  ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;
+
+ALTER TABLE project_email_unlocks
+  ADD COLUMN IF NOT EXISTS unlocks_used INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE project_email_unlocks
+  ADD COLUMN IF NOT EXISTS last_unlock_at TIMESTAMPTZ;
+
+ALTER TABLE project_email_unlocks
+  ADD COLUMN IF NOT EXISTS per_email_limit INTEGER;
+
+ALTER TABLE project_email_unlocks
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE project_email_unlocks
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE project_email_unlocks
+  ADD COLUMN IF NOT EXISTS last_ip TEXT;
+
+ALTER TABLE project_email_unlocks
+  ADD COLUMN IF NOT EXISTS last_user_agent TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_project_email_unlocks_project
+  ON project_email_unlocks (project_id);
+
+CREATE INDEX IF NOT EXISTS idx_project_email_unlocks_recent
+  ON project_email_unlocks (project_id, last_unlock_at DESC);
+
 CREATE TABLE IF NOT EXISTS magic_links (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,

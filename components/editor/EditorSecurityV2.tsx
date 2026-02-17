@@ -128,18 +128,18 @@ const EditorSecurityV2: React.FC<EditorSecurityV2Props> = ({
     onSaveProject(updates);
   };
 
-  const ipCounts = unlockActivity.reduce<Record<string, number>>((acc, entry) => {
+  const ipCounts: Record<string, number> = {};
+  const deviceCounts: Record<string, number> = {};
+  unlockActivity.forEach((entry) => {
     const ip = entry.ip || '';
-    if (!ip) return acc;
-    acc[ip] = (acc[ip] || 0) + 1;
-    return acc;
-  }, {});
-  const deviceCounts = unlockActivity.reduce<Record<string, number>>((acc, entry) => {
+    if (ip) {
+      ipCounts[ip] = (ipCounts[ip] || 0) + 1;
+    }
     const device = deviceFromUserAgent(entry.userAgent);
-    if (!device) return acc;
-    acc[device] = (acc[device] || 0) + 1;
-    return acc;
-  }, {});
+    if (device) {
+      deviceCounts[device] = (deviceCounts[device] || 0) + 1;
+    }
+  });
 
   return (
     <div className="space-y-8 animate-in fade-in duration-300 pb-10">

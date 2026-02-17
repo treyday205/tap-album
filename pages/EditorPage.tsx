@@ -426,13 +426,14 @@ const EditorPage: React.FC = () => {
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, type: 'PROJECT_IMAGE' | 'TRACK_IMAGE' | 'TRACK_AUDIO') => {
-    const files = Array.from(e.target.files || []);
-    if (files.length === 0) {
+    const inputFiles = e.target.files;
+    if (!inputFiles || inputFiles.length === 0) {
       if (import.meta.env.DEV) {
         console.warn('[DEV] upload canceled', { type });
       }
       return;
     }
+    const files: File[] = Array.from(inputFiles);
     setUploadError(null);
 
     const isAudioUpload = type === 'TRACK_AUDIO';
@@ -456,7 +457,6 @@ const EditorPage: React.FC = () => {
       }
 
       const targetTrackId = uploadTargetTrackId;
-      const targetIndex = tracks.findIndex((track) => track.trackId === targetTrackId);
       let selectedFiles = files;
       const maxNewTracks = Math.max(0, MAX_TRACKS - tracks.length);
       const maxFiles = 1 + maxNewTracks;
@@ -469,6 +469,7 @@ const EditorPage: React.FC = () => {
       if (selectedFiles.length > 1) {
         for (let i = 1; i < selectedFiles.length; i++) {
           const file = selectedFiles[i];
+          if (!file) continue;
           const newTrack: Track = {
             trackId: Math.random().toString(36).substr(2, 9),
             projectId: projectId!,
@@ -485,10 +486,13 @@ const EditorPage: React.FC = () => {
         }
       }
 
-      const orderedUploads = [
+      type UploadCandidate = { trackId: string; file?: File };
+      type UploadJob = { trackId: string; file: File };
+      const orderedUploads: UploadJob[] = [
         { trackId: targetTrackId, file: selectedFiles[0] },
         ...newTracks.map((track, index) => ({ trackId: track.trackId, file: selectedFiles[index + 1] }))
-      ].filter((item) => item.file);
+      ]
+        .filter((item: UploadCandidate): item is UploadJob => Boolean(item.file));
 
       const uploadAudioToTrack = async (file: File, trackId: string) => {
         setUploadingTrackId(trackId);
