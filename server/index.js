@@ -1043,6 +1043,10 @@ const sanitizePwaPath = (value) => {
   if (lowered === '/dashboard' || lowered.startsWith('/dashboard/')) return '/';
   if (raw.startsWith('/api/')) return '/';
   if (raw.includes('..')) return '/';
+  const isRootPath = raw === '/';
+  const isDirectPublicPath = /^\/[^/?#]+$/.test(raw);
+  const isTapPublicPath = /^\/t\/[^/?#]+$/.test(raw);
+  if (!isRootPath && !isDirectPublicPath && !isTapPublicPath) return '/';
   return raw;
 };
 const createDefaultProjectPayload = ({ ownerUserId, projectId, slug, title, artistName }) => {
@@ -2670,9 +2674,9 @@ app.get('/api/pwa/manifest', async (req, res) => {
   let appName = PWA_APP_NAME;
   let appShortName = 'TAP';
   let appDescription = 'Live album experience';
-  const installStartPath = '/';
+  const installStartPath = requestedPath !== '/' ? requestedPath : '/';
   if (IS_DEV && requestedPath !== '/') {
-    console.log('[DEV] ignoring dynamic PWA start path override', { requestedPath });
+    console.log('[DEV] using dynamic PWA start path', { requestedPath });
   }
 
   if (slug) {
