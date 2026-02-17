@@ -163,6 +163,8 @@ CREATE TABLE IF NOT EXISTS tracks (
   track_id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
   title TEXT NOT NULL,
+  track_no INTEGER NOT NULL DEFAULT 0,
+  storage_path TEXT,
   mp3_url TEXT,
   artwork_url TEXT,
   sort_order INTEGER NOT NULL DEFAULT 0,
@@ -170,5 +172,24 @@ CREATE TABLE IF NOT EXISTS tracks (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE tracks
+  ADD COLUMN IF NOT EXISTS track_no INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE tracks
+  ADD COLUMN IF NOT EXISTS storage_path TEXT;
+
+UPDATE tracks
+SET track_no = CASE
+  WHEN COALESCE(track_no, 0) > 0 THEN track_no
+  WHEN COALESCE(sort_order, 0) > 0 THEN sort_order
+  ELSE 1
+END;
+
+UPDATE tracks
+SET storage_path = SUBSTRING(mp3_url FROM 7)
+WHERE (storage_path IS NULL OR BTRIM(storage_path) = '')
+  AND mp3_url LIKE 'asset:%';
+
 CREATE INDEX IF NOT EXISTS idx_projects_slug ON projects (slug);
 CREATE INDEX IF NOT EXISTS idx_tracks_project ON tracks (project_id);
+CREATE INDEX IF NOT EXISTS idx_tracks_project_track_no ON tracks (project_id, track_no);

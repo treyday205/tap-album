@@ -1,5 +1,5 @@
-const STATIC_CACHE = 'tap-static-v1';
-const RUNTIME_CACHE = 'tap-runtime-v1';
+const STATIC_CACHE = 'tap-static-v2';
+const RUNTIME_CACHE = 'tap-runtime-v2';
 const PRECACHE_URLS = [
   '/',
   '/index.html',

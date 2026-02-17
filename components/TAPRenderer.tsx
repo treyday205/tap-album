@@ -17,6 +17,11 @@ interface TAPRendererProps {
   coverSizes?: string;
   useGoLiveHeader?: boolean;
   resolveAssetUrl?: (value: string) => string;
+  resolveTrackAudioUrl?: (
+    track: Track,
+    options?: { forceRefresh?: boolean; reason?: 'manual' | 'probe' | 'stalled' | 'waiting' | 'error' }
+  ) => Promise<string>;
+  onPlayerStateChange?: (state: { isPlaying: boolean; currentTrackId: string | null }) => void;
   showInstallButton?: boolean;
   onInstallClick?: () => void;
 }
@@ -28,6 +33,9 @@ const formatTime = (value: number): string => {
   return `${mins}:${secs}`;
 };
 
+const STALL_RECOVERY_COOLDOWN_MS = 2500;
+const STALL_RECOVERY_MAX_ATTEMPTS = 3;
+
 const TAPRenderer: React.FC<TAPRendererProps> = ({
   project,
   tracks,
@@ -38,6 +46,8 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   coverSizes,
   useGoLiveHeader = false,
   resolveAssetUrl,
+  resolveTrackAudioUrl,
+  onPlayerStateChange,
   showInstallButton = false,
   onInstallClick
 }) => {
@@ -45,7 +55,23 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const activeTrackRef = useRef<Track | null>(null);
+  const manualPauseRef = useRef(false);
+  const stallRetryTimerRef = useRef<number | null>(null);
+  const isRecovering = useRef(false);
+  const stallRecoveryAttemptsRef = useRef(0);
+  const lastTimeUpdateLogSecondRef = useRef(-1);
+
+  const clearStallRecoveryTimer = () => {
+    if (typeof window !== 'undefined' && stallRetryTimerRef.current !== null) {
+      window.clearTimeout(stallRetryTimerRef.current);
+    }
+    stallRetryTimerRef.current = null;
+    stallRecoveryAttemptsRef.current = 0;
+    isRecovering.current = false;
+  };
 
   const resolveUrl = (value: string) => {
     if (!value) return '';
@@ -65,8 +91,323 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     );
   };
 
+  const isPlayableAudioUrl = (value: string) => {
+    const url = String(value || '').trim();
+    const isHttp = url.startsWith('http://') || url.startsWith('https://');
+    const isRelative = url.startsWith('/');
+    const isBlob = url.startsWith('blob:');
+    return url.length > 5 && (
+      url.startsWith('data:audio/') ||
+      isBlob ||
+      url.includes('p.scdn.co') ||
+      ((isHttp || isRelative) && !url.includes('open.spotify.com'))
+    );
+  };
+
+  const normalizeRuntimeAudioUrl = (value: string) => {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    if (typeof window === 'undefined') return raw;
+    try {
+      return new URL(raw, window.location.origin).toString();
+    } catch {
+      return raw;
+    }
+  };
+
+  const canPlayTrack = (track: Track, resolvedUrl: string) => {
+    if (isPlayableAudioUrl(resolvedUrl)) return true;
+    if (String(track.storagePath || '').trim()) return true;
+    const raw = String(track.mp3Url || '').trim();
+    const normalizedRaw = raw.toLowerCase();
+    if (normalizedRaw.startsWith('bank:')) {
+      return false;
+    }
+    if (isAudioAssetRef(raw)) return true;
+    return (
+      normalizedRaw.includes('.mp3') ||
+      normalizedRaw.includes('.wav') ||
+      normalizedRaw.includes('.m4a') ||
+      normalizedRaw.includes('.aac') ||
+      normalizedRaw.includes('.ogg') ||
+      normalizedRaw.includes('.flac')
+    );
+  };
+
+  const logAudioEvent = (
+    event: string,
+    audio: HTMLAudioElement | null,
+    details: Record<string, unknown> = {}
+  ) => {
+    const currentTrack = activeTrackRef.current;
+    console.log('[AUDIO]', {
+      event,
+      projectId: project.projectId,
+      trackId: currentTrack?.trackId || currentlyPlayingTrackId || null,
+      title: currentTrack?.title || null,
+      paused: audio?.paused ?? null,
+      ended: audio?.ended ?? null,
+      currentTime: audio ? Number(audio.currentTime || 0) : null,
+      duration: audio && Number.isFinite(audio.duration) ? Number(audio.duration) : null,
+      readyState: audio?.readyState ?? null,
+      networkState: audio?.networkState ?? null,
+      errorCode: audio?.error?.code ?? null,
+      isRecovering: isRecovering.current,
+      recoveryAttempts: stallRecoveryAttemptsRef.current,
+      ...details
+    });
+  };
+
+  const rangeCheckPlayableUrl = async (url: string, track: Track) => {
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-0' },
+        cache: 'no-store'
+      });
+      if (response.body) {
+        void response.body.cancel().catch(() => undefined);
+      }
+      const ok = response.status === 200 || response.status === 206;
+      console.log('[AUDIO]', {
+        event: 'url-health-check',
+        method: 'GET',
+        range: 'bytes=0-0',
+        projectId: project.projectId,
+        trackId: track.trackId,
+        status: response.status,
+        ok,
+        url
+      });
+      return ok ? null : `Track unavailable (HTTP ${response.status})`;
+    } catch (error: any) {
+      console.log('[AUDIO]', {
+        event: 'url-health-check',
+        method: 'GET',
+        range: 'bytes=0-0',
+        projectId: project.projectId,
+        trackId: track.trackId,
+        status: 0,
+        ok: false,
+        url,
+        error: String(error?.message || error || 'network error')
+      });
+      return 'Track unavailable (network)';
+    }
+  };
+
+  const attemptStallRecovery = async (triggerEvent: 'stalled' | 'waiting' | 'error') => {
+    if (isRecovering.current) return;
+
+    const audio = audioRef.current;
+    const track = activeTrackRef.current;
+    if (!audio || !track) {
+      clearStallRecoveryTimer();
+      return;
+    }
+    if (manualPauseRef.current || audio.ended) {
+      clearStallRecoveryTimer();
+      return;
+    }
+
+    if (stallRecoveryAttemptsRef.current >= STALL_RECOVERY_MAX_ATTEMPTS) {
+      logAudioEvent('recovery-exhausted', audio, {
+        triggerEvent,
+        maxAttempts: STALL_RECOVERY_MAX_ATTEMPTS
+      });
+      setPlaybackError('Playback stalled. Tap play to retry.');
+      clearStallRecoveryTimer();
+      return;
+    }
+
+    stallRecoveryAttemptsRef.current += 1;
+    const attempt = stallRecoveryAttemptsRef.current;
+    isRecovering.current = true;
+    let recovered = false;
+    let shouldRetry = false;
+
+    try {
+      if (!audio.paused && !audio.ended && !audio.error && audio.readyState >= 3) {
+        recovered = true;
+        clearStallRecoveryTimer();
+        return;
+      }
+
+      try {
+        await audio.play();
+        setPlaybackError(null);
+        logAudioEvent('recovery-play-success', audio, {
+          triggerEvent,
+          strategy: 'play',
+          attempt
+        });
+        recovered = true;
+        clearStallRecoveryTimer();
+        return;
+      } catch (playError: any) {
+        logAudioEvent('recovery-play-failed', audio, {
+          triggerEvent,
+          strategy: 'play',
+          attempt,
+          error: String(playError?.message || playError || 'play failed')
+        });
+        shouldRetry = true;
+      }
+
+      if (!resolveTrackAudioUrl) {
+        shouldRetry = true;
+        return;
+      }
+
+      const canReplaceSource = audio.paused || audio.ended || Boolean(audio.error);
+      if (!canReplaceSource) {
+        logAudioEvent('recovery-refresh-skipped', audio, {
+          triggerEvent,
+          attempt,
+          reason: 'active-playback-no-error'
+        });
+        shouldRetry = true;
+        return;
+      }
+
+      let refreshedUrl = '';
+      try {
+        const next = await resolveTrackAudioUrl(track, {
+          forceRefresh: true,
+          reason: triggerEvent
+        });
+        refreshedUrl = String(next || '').trim();
+      } catch (refreshError: any) {
+        logAudioEvent('recovery-refresh-failed', audio, {
+          triggerEvent,
+          attempt,
+          error: String(refreshError?.message || refreshError || 'refresh failed')
+        });
+        shouldRetry = true;
+        return;
+      }
+
+      if (!isPlayableAudioUrl(refreshedUrl)) {
+        logAudioEvent('recovery-refresh-invalid-url', audio, { triggerEvent, attempt });
+        shouldRetry = true;
+        return;
+      }
+
+      const currentSrc = normalizeRuntimeAudioUrl(String(audio.currentSrc || audio.src || ''));
+      const nextSrc = normalizeRuntimeAudioUrl(refreshedUrl);
+      const shouldReplaceSource = Boolean(nextSrc) && nextSrc !== currentSrc;
+      if (!shouldReplaceSource && !audio.error) {
+        logAudioEvent('recovery-refresh-not-needed', audio, { triggerEvent });
+        recovered = true;
+        clearStallRecoveryTimer();
+        return;
+      }
+
+      const resumeTime = Number.isFinite(audio.currentTime) ? Math.max(0, audio.currentTime) : 0;
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+      audio.src = refreshedUrl;
+      audio.load();
+      if (resumeTime > 0) {
+        const restoreTime = () => {
+          try {
+            const maxTime = Number.isFinite(audio.duration) && audio.duration > 0
+              ? Math.max(0, audio.duration - 0.2)
+              : resumeTime;
+            audio.currentTime = Math.min(resumeTime, maxTime);
+          } catch {
+            // Some mobile browsers may block seek until metadata settles.
+          }
+        };
+        audio.addEventListener('loadedmetadata', restoreTime, { once: true });
+      }
+
+      await audio.play();
+      setPlaybackError(null);
+      logAudioEvent('recovery-refresh-success', audio, {
+        triggerEvent,
+        strategy: 'refresh-src',
+        replacedSource: true,
+        attempt,
+        resumeTime
+      });
+      recovered = true;
+      clearStallRecoveryTimer();
+    } catch (recoveryError: any) {
+      shouldRetry = true;
+      logAudioEvent('recovery-attempt-error', audio, {
+        triggerEvent,
+        attempt,
+        error: String(recoveryError?.message || recoveryError || 'unknown recovery error')
+      });
+    } finally {
+      isRecovering.current = false;
+      if (!recovered && shouldRetry) {
+        if (stallRecoveryAttemptsRef.current >= STALL_RECOVERY_MAX_ATTEMPTS) {
+          logAudioEvent('recovery-exhausted', audio, {
+            triggerEvent,
+            maxAttempts: STALL_RECOVERY_MAX_ATTEMPTS
+          });
+          setPlaybackError('Playback stalled. Tap play to retry.');
+          clearStallRecoveryTimer();
+        } else {
+          const nextAttempt = stallRecoveryAttemptsRef.current + 1;
+          logAudioEvent('recovery-retry-scheduled', audio, {
+            triggerEvent,
+            attempt,
+            nextAttempt,
+            cooldownMs: STALL_RECOVERY_COOLDOWN_MS
+          });
+          if (typeof window !== 'undefined') {
+            if (stallRetryTimerRef.current !== null) {
+              window.clearTimeout(stallRetryTimerRef.current);
+            }
+            stallRetryTimerRef.current = window.setTimeout(() => {
+              stallRetryTimerRef.current = null;
+              void attemptStallRecovery(triggerEvent);
+            }, STALL_RECOVERY_COOLDOWN_MS);
+          }
+        }
+      }
+    }
+  };
+
+  const startStallRecovery = (triggerEvent: 'stalled' | 'waiting' | 'error') => {
+    const audio = audioRef.current;
+    if (!audio || !activeTrackRef.current || manualPauseRef.current) return;
+    stallRecoveryAttemptsRef.current = 0;
+    isRecovering.current = false;
+    if (typeof window !== 'undefined' && stallRetryTimerRef.current !== null) {
+      window.clearTimeout(stallRetryTimerRef.current);
+      stallRetryTimerRef.current = null;
+    }
+    logAudioEvent('recovery-loop-start', audio, {
+      triggerEvent,
+      cooldownMs: STALL_RECOVERY_COOLDOWN_MS,
+      maxAttempts: STALL_RECOVERY_MAX_ATTEMPTS
+    });
+    if (typeof window !== 'undefined') {
+      stallRetryTimerRef.current = window.setTimeout(() => {
+        stallRetryTimerRef.current = null;
+        void attemptStallRecovery(triggerEvent);
+      }, STALL_RECOVERY_COOLDOWN_MS);
+    }
+  };
+
+  useEffect(() => {
+    if (!onPlayerStateChange) return;
+    onPlayerStateChange({
+      isPlaying,
+      currentTrackId: currentlyPlayingTrackId
+    });
+  }, [isPlaying, currentlyPlayingTrackId, onPlayerStateChange]);
+
   useEffect(() => {
     return () => {
+      clearStallRecoveryTimer();
+      activeTrackRef.current = null;
+      manualPauseRef.current = false;
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current.removeAttribute('src');
@@ -75,64 +416,105 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     };
   }, []);
 
-  const handleTogglePlay = (track: Track) => {
+  const handleTogglePlay = async (track: Track) => {
     if (!audioRef.current) return;
 
-    const rawUrl = (track.mp3Url || '').trim();
-    const url = resolveUrl(rawUrl);
-    const isHttp = url.startsWith('http://') || url.startsWith('https://');
-    const isRelative = url.startsWith('/');
-    const isBlob = url.startsWith('blob:');
-    const isPlayable = url.length > 5 && (
-      url.startsWith('data:audio/') ||
-      isBlob ||
-      url.includes('p.scdn.co') ||
-      ((isHttp || isRelative) && !url.includes('open.spotify.com'))
-    );
-
-    if (!isPlayable) return;
-
     const audio = audioRef.current;
+    setPlaybackError(null);
 
-    if (currentlyPlayingTrackId !== track.trackId) {
-      try {
+    if (currentlyPlayingTrackId === track.trackId && isPlaying) {
+      manualPauseRef.current = true;
+      clearStallRecoveryTimer();
+      audio.pause();
+      setIsPlaying(false);
+      logAudioEvent('pause', audio, { reason: 'user-toggle' });
+      return;
+    }
+
+    manualPauseRef.current = false;
+    activeTrackRef.current = track;
+
+    try {
+      const rawUrl = (track.mp3Url || '').trim();
+      const fallbackUrl = resolveUrl(rawUrl);
+      let playableUrl = fallbackUrl;
+
+      if (resolveTrackAudioUrl) {
+        const resolved = await resolveTrackAudioUrl(track, { reason: 'manual' });
+        playableUrl = String(resolved || '').trim() || fallbackUrl;
+      }
+
+      if (!isPlayableAudioUrl(playableUrl)) {
+        throw new Error('Audio URL is missing or invalid.');
+      }
+
+      let probeError = await rangeCheckPlayableUrl(playableUrl, track);
+      if (probeError && resolveTrackAudioUrl) {
+        const refreshed = await resolveTrackAudioUrl(track, {
+          forceRefresh: true,
+          reason: 'probe'
+        });
+        playableUrl = String(refreshed || '').trim() || playableUrl;
+        if (isPlayableAudioUrl(playableUrl)) {
+          probeError = await rangeCheckPlayableUrl(playableUrl, track);
+        }
+      }
+      if (probeError) {
+        throw new Error(probeError);
+      }
+
+      const shouldReplaceSource =
+        currentlyPlayingTrackId !== track.trackId ||
+        normalizeRuntimeAudioUrl(String(audio.currentSrc || '')) !== normalizeRuntimeAudioUrl(playableUrl);
+      const canReplaceSource =
+        currentlyPlayingTrackId !== track.trackId ||
+        audio.paused ||
+        audio.ended ||
+        Boolean(audio.error);
+
+      if (shouldReplaceSource && canReplaceSource) {
+        clearStallRecoveryTimer();
         audio.pause();
         audio.removeAttribute('src');
         audio.load();
-        audio.src = url;
+        audio.src = playableUrl;
         audio.load();
         setCurrentTime(0);
         setDuration(0);
-
-        const playPromise = audio.play();
-        if (playPromise !== undefined) {
-          playPromise
-            .then(() => {
-              setIsPlaying(true);
-              setCurrentlyPlayingTrackId(track.trackId);
-              if (!isPreview) StorageService.logEvent(project.projectId, EventType.TRACK_PLAY, track.title);
-            })
-            .catch(() => {
-              setIsPlaying(false);
-              setCurrentlyPlayingTrackId(null);
-            });
-        }
-      } catch (err) {
-        console.error('Audio engine error:', err);
+      } else if (shouldReplaceSource && !canReplaceSource) {
+        logAudioEvent('source-refresh-skipped', audio, {
+          reason: 'active-playback-no-error'
+        });
       }
-    } else if (isPlaying) {
-      audio.pause();
-      setIsPlaying(false);
-    } else {
+
       const playPromise = audio.play();
       if (playPromise !== undefined) {
-        playPromise
-          .then(() => {
-            setIsPlaying(true);
-            if (!isPreview) StorageService.logEvent(project.projectId, EventType.TRACK_PLAY, track.title);
-          })
-          .catch(() => setIsPlaying(false));
+        await playPromise;
       }
+      clearStallRecoveryTimer();
+      setIsPlaying(true);
+      setCurrentlyPlayingTrackId(track.trackId);
+      logAudioEvent('play', audio, { reason: 'user-toggle' });
+      if (!isPreview) StorageService.logEvent(project.projectId, EventType.TRACK_PLAY, track.title);
+    } catch (err: any) {
+      const message = String(err?.message || 'Unable to play this track right now.');
+      setPlaybackError(message);
+      setIsPlaying(false);
+      clearStallRecoveryTimer();
+      if (currentlyPlayingTrackId === track.trackId) {
+        setCurrentlyPlayingTrackId(null);
+        activeTrackRef.current = null;
+      }
+      logAudioEvent('error', audio, {
+        reason: 'toggle-play-failed',
+        trackId: track.trackId,
+        error: message
+      });
+      console.warn('[AUDIO] track playback failed', {
+        projectId: project.projectId,
+        trackId: track.trackId,
+        error: message
+      });
     }
   };
 
@@ -146,9 +528,11 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   const mp3Tracks = tracks.filter((track) => {
     const rawUrl = (track.mp3Url || '').trim();
     const resolvedUrl = resolveUrl(rawUrl);
+    const storagePath = String(track.storagePath || '').trim();
     const normalizedRaw = rawUrl.toLowerCase();
     const normalizedResolved = resolvedUrl.toLowerCase();
     return (
+      Boolean(storagePath) ||
       isAudioAssetRef(rawUrl) ||
       normalizedResolved.startsWith('blob:') ||
       normalizedResolved.startsWith('data:audio/mpeg') ||
@@ -252,27 +636,63 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     <div className={`${isPreview ? 'w-full h-full bg-slate-950 overflow-y-auto scrollbar-hide text-slate-100 flex flex-col' : 'relative w-full tap-full-height bg-slate-950 text-slate-100 flex flex-col'}`}>
       <audio
         ref={audioRef}
-        onEnded={() => {
+        onEnded={(event) => {
+          clearStallRecoveryTimer();
+          activeTrackRef.current = null;
+          manualPauseRef.current = false;
+          lastTimeUpdateLogSecondRef.current = -1;
           setIsPlaying(false);
           setCurrentlyPlayingTrackId(null);
           setCurrentTime(0);
+          logAudioEvent('ended', event.currentTarget);
         }}
-        onPlay={() => setIsPlaying(true)}
-        onPause={() => setIsPlaying(false)}
+        onPlay={(event) => {
+          manualPauseRef.current = false;
+          clearStallRecoveryTimer();
+          setIsPlaying(true);
+          logAudioEvent('play', event.currentTarget, { reason: 'audio-event' });
+        }}
+        onPause={(event) => {
+          setIsPlaying(false);
+          logAudioEvent('pause', event.currentTarget, { reason: manualPauseRef.current ? 'user-pause' : 'audio-event' });
+        }}
+        onStalled={(event) => {
+          logAudioEvent('stalled', event.currentTarget);
+          startStallRecovery('stalled');
+        }}
+        onWaiting={(event) => {
+          logAudioEvent('waiting', event.currentTarget);
+          startStallRecovery('waiting');
+        }}
+        onError={(event) => {
+          const code = event.currentTarget.error?.code || 0;
+          logAudioEvent('error', event.currentTarget, { reason: 'audio-element-error', code });
+          setPlaybackError(`Playback error (code ${code || 'unknown'})`);
+          startStallRecovery('error');
+        }}
         onTimeUpdate={(event) => {
           const next = Number(event.currentTarget.currentTime);
-          setCurrentTime(Number.isFinite(next) ? next : 0);
+          const normalized = Number.isFinite(next) ? next : 0;
+          setCurrentTime(normalized);
+          const wholeSeconds = Math.floor(normalized);
+          if (wholeSeconds !== lastTimeUpdateLogSecondRef.current) {
+            lastTimeUpdateLogSecondRef.current = wholeSeconds;
+            logAudioEvent('timeupdate', event.currentTarget);
+          }
         }}
         onLoadedMetadata={(event) => {
           const next = Number(event.currentTarget.duration);
           setDuration(Number.isFinite(next) ? next : 0);
+          logAudioEvent('loadedmetadata', event.currentTarget);
         }}
         onDurationChange={(event) => {
           const next = Number(event.currentTarget.duration);
           setDuration(Number.isFinite(next) ? next : 0);
+          logAudioEvent('durationchange', event.currentTarget);
         }}
         playsInline
-        preload="metadata"
+        preload="auto"
+        crossOrigin="anonymous"
         className="hidden"
       />
 
@@ -350,6 +770,11 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
         )}
 
         <div className={listWrapperClass}>
+          {playbackError && (
+            <div className="mb-3 rounded-2xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-[10px] font-black uppercase tracking-[0.2em] text-red-300">
+              {playbackError}
+            </div>
+          )}
           <div className={listClass}>
             {isPreview && displayTracks.length > 0 && (
               <div className="flex items-center justify-between px-1 pb-2">
@@ -361,20 +786,24 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
                 </span>
               </div>
             )}
-            {displayTracks.map((track, index) => (
-              <TrackRow
-                key={track.trackId}
-                track={track}
-                artworkUrl={resolveUrl(track.artworkUrl || '') || coverSrc}
-                subtext={project.artistName || ''}
-                trackNumber={index + 1}
-                audioUrl={resolveUrl(track.mp3Url || '')}
-                isPlaying={isPlaying && currentlyPlayingTrackId === track.trackId}
-                isActive={currentlyPlayingTrackId === track.trackId}
-                onTogglePlay={handleTogglePlay}
-                isPreview={isPreview}
-              />
-            ))}
+            {displayTracks.map((track, index) => {
+              const audioUrl = resolveUrl(track.mp3Url || '');
+              return (
+                <TrackRow
+                  key={track.trackId}
+                  track={track}
+                  artworkUrl={resolveUrl(track.artworkUrl || '') || coverSrc}
+                  subtext={project.artistName || ''}
+                  trackNumber={index + 1}
+                  audioUrl={audioUrl}
+                  canPlay={canPlayTrack(track, audioUrl)}
+                  isPlaying={isPlaying && currentlyPlayingTrackId === track.trackId}
+                  isActive={currentlyPlayingTrackId === track.trackId}
+                  onTogglePlay={handleTogglePlay}
+                  isPreview={isPreview}
+                />
+              );
+            })}
             {displayTracks.length === 0 && (
               <div className="py-12 text-center bg-slate-900/20 rounded-[2rem] border border-dashed border-slate-800/60">
                 <Music2 size={32} className="mx-auto text-slate-700 mb-3" />

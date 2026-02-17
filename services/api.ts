@@ -260,11 +260,9 @@ export const Api = {
     }),
 
   getProjectBySlug: (slug: string) =>
-    cachedRequest(`project:${slug}`, () =>
-      request(`/api/projects/${encodeURIComponent(slug)}`, {
-        method: 'GET'
-      })
-    ),
+    request(`/api/projects/${encodeURIComponent(slug)}`, {
+      method: 'GET'
+    }),
 
   signAssets: (projectId: string, assetRefs: string[], token?: string) =>
     request('/api/assets/sign', {
@@ -289,7 +287,7 @@ export const Api = {
     new Promise(async (resolve, reject) => {
       const contentType = file.type || 'application/octet-stream';
 
-      const requestPresign = (preferLocal = false) =>
+      const requestPresign = () =>
         request('/api/uploads/presign', {
           method: 'POST',
           body: JSON.stringify({
@@ -298,8 +296,7 @@ export const Api = {
             assetKind: options.assetKind,
             contentType,
             fileName: file.name,
-            size: file.size,
-            preferLocal
+            size: file.size
           })
         });
 
@@ -410,17 +407,11 @@ export const Api = {
         });
 
       try {
-        const presign = await requestPresign(false);
+        const presign = await requestPresign();
         await uploadWithConfig(presign);
         resolve({ assetRef: String(presign?.assetRef || '') });
       } catch (err: any) {
-        try {
-          const presignFallback = await requestPresign(true);
-          await uploadWithConfig(presignFallback);
-          resolve({ assetRef: String(presignFallback?.assetRef || '') });
-        } catch (fallbackErr: any) {
-          reject(fallbackErr);
-        }
+        reject(err);
       }
     }),
 

@@ -11,7 +11,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { Transform } from 'stream';
 import { pipeline } from 'stream/promises';
-import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
@@ -99,7 +99,7 @@ const MAX_PINS_PER_EMAIL = 1_000_000;
 const MAX_PIN_UNLOCKS_PER_PROJECT = 1_000_000;
 const MAX_ACTIVE_PINS_PER_PROJECT = 1_000_000;
 const PWA_APP_NAME = 'TAP Album';
-const PWA_MANIFEST_VERSION = String(process.env.PWA_MANIFEST_VERSION || '2026.02.17.2').trim() || '2026.02.17.2';
+const PWA_MANIFEST_VERSION = String(process.env.PWA_MANIFEST_VERSION || '2026.02.17.3').trim() || '2026.02.17.3';
 const IS_DEV = process.env.NODE_ENV !== 'production';
 const MAX_AUDIO_BYTES = 1024 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -122,8 +122,9 @@ const SUPABASE_ANON_KEY =
   process.env.SUPABASE_PUBLISHABLE_KEY ||
   process.env.VITE_SUPABASE_ANON_KEY ||
   process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
-const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET;
-const SUPABASE_SIGNED_URL_TTL = Number(process.env.SUPABASE_SIGNED_URL_TTL || 900);
+const SUPABASE_BUCKET = String(process.env.SUPABASE_BUCKET || 'tap-album').trim() || 'tap-album';
+const SUPABASE_SIGNED_URL_TTL = Number(process.env.SUPABASE_SIGNED_URL_TTL || 3600);
+const SUPABASE_TRACK_URL_TTL = Number(process.env.SUPABASE_TRACK_URL_TTL || 3600);
 const SUPABASE_CACHE_CONTROL = process.env.SUPABASE_CACHE_CONTROL || '3600';
 const SUPABASE_AUTH_SITE_URL = normalizeAppUrl(process.env.SUPABASE_AUTH_SITE_URL || APP_URL);
 const SUPABASE_AUTH_REDIRECT_URLS = String(process.env.SUPABASE_AUTH_REDIRECT_URLS || '')
@@ -132,6 +133,14 @@ const SUPABASE_AUTH_REDIRECT_URLS = String(process.env.SUPABASE_AUTH_REDIRECT_UR
   .filter(Boolean);
 const AUTO_GENERATED_TITLE = 'New Album';
 const LEGACY_DEFAULT_COVER_URL = 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&q=80&w=800';
+const parseOptionalBoolean = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized === 'true') return true;
+  if (normalized === 'false') return false;
+  return null;
+};
+const SUPABASE_BUCKET_PUBLIC = parseOptionalBoolean(process.env.SUPABASE_BUCKET_PUBLIC);
 const getSupabaseKeyType = (key) => {
   if (!key) return 'missing';
   const trimmed = String(key).trim();
@@ -151,6 +160,7 @@ const SUPABASE_KEY_TYPE = getSupabaseKeyType(SUPABASE_SERVICE_ROLE_KEY);
 const ASSET_REF_PREFIX = 'asset:';
 
 const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac']);
+const TRACK_AUDIO_EXTENSIONS = new Set(['mp3']);
 const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif']);
 const ASSET_KINDS = new Set(['track-audio', 'track-artwork', 'project-cover']);
 
@@ -202,9 +212,7 @@ const hasS3Config = () =>
 const hasSupabaseAdminConfig = () =>
   Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) &&
   SUPABASE_KEY_TYPE !== 'publishable';
-const hasSupabaseConfig = () =>
-  Boolean(SUPABASE_BUCKET) &&
-  hasSupabaseAdminConfig();
+const hasSupabaseConfig = () => hasSupabaseAdminConfig();
 const hasSupabaseAuthClientConfig = () =>
   Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
 
@@ -214,6 +222,8 @@ const getStorageStatus = () => ({
   supabaseAuthClientConfigured: hasSupabaseAuthClientConfig(),
   supabaseUrl: SUPABASE_URL || null,
   supabaseBucket: SUPABASE_BUCKET || null,
+  supabaseBucketPublic: SUPABASE_BUCKET_PUBLIC,
+  supabaseTrackUrlTtl: SUPABASE_TRACK_URL_TTL,
   supabaseKeyType: SUPABASE_KEY_TYPE,
   s3Configured: hasS3Config(),
   bucket: S3_BUCKET || null,
@@ -241,6 +251,14 @@ const isSafeAssetKey = (value) => {
   const ext = path.extname(value).replace('.', '').toLowerCase();
   if (!ext) return false;
   return /^[a-zA-Z0-9/_\-.]+$/.test(value);
+};
+
+const isAudioAssetKey = (value) => {
+  const key = String(value || '').trim().toLowerCase();
+  if (!key) return false;
+  if (key.includes('/tracks/')) return true;
+  const ext = path.extname(key).replace('.', '');
+  return AUDIO_EXTENSIONS.has(ext);
 };
 
 const signAssetKey = async (key) => {
@@ -337,7 +355,7 @@ const buildObjectKey = ({ assetKind, projectId, trackId, extension }) => {
   const base = prefix ? `${prefix}/` : '';
 
   if (assetKind === 'track-audio') {
-    return `${base}audio/${projectId}/${trackId}/${version}.${extension}`;
+    return `projects/${projectId}/tracks/${version}.mp3`;
   }
   if (assetKind === 'track-artwork') {
     return `${base}artwork/${projectId}/${trackId}/${version}.${extension}`;
@@ -387,13 +405,13 @@ const supabaseAdmin =
 const supabase = hasSupabaseConfig() ? supabaseAdmin : null;
 
 if (!s3Client) {
-  console.warn('S3/R2 storage is not configured. Uploads will use local storage.');
+  console.warn('S3/R2 storage is not configured. Legacy S3 asset signing is disabled.');
 }
 if (!supabaseAdmin) {
   console.warn('Supabase admin client is not configured. Supabase Auth exchange and storage signing are disabled.');
 }
 if (!supabase) {
-  console.warn('Supabase storage is not configured. Uploads will use S3/R2 or local storage.');
+  console.warn('Supabase storage is not configured. Track uploads are disabled.');
   if (SUPABASE_KEY_TYPE === 'publishable') {
     console.warn('Supabase key appears to be publishable. Use the service role (secret) key on the server.');
   }
@@ -512,7 +530,7 @@ const getSupabaseAuthDiagnostics = (req) => {
 };
 
 app.post('/api/uploads/presign', async (req, res) => {
-  const { projectId, trackId, contentType, fileName, size, assetKind, preferLocal } = req.body || {};
+  const { projectId, trackId, contentType, fileName, size, assetKind } = req.body || {};
   const safeProjectId = safeSegment(projectId);
   const normalizedKind = String(assetKind || '').trim();
   const safeTrackId = safeSegment(trackId);
@@ -543,7 +561,7 @@ app.post('/api/uploads/presign', async (req, res) => {
     }
   }
 
-  const allowedExtensions = normalizedKind === 'track-audio' ? AUDIO_EXTENSIONS : IMAGE_EXTENSIONS;
+  const allowedExtensions = normalizedKind === 'track-audio' ? TRACK_AUDIO_EXTENSIONS : IMAGE_EXTENSIONS;
   const extension =
     sanitizeExtension(mimeToExt(normalizedType), allowedExtensions) ||
     extensionFromFilename(fileName, allowedExtensions);
@@ -551,7 +569,7 @@ app.post('/api/uploads/presign', async (req, res) => {
   if (!extension) {
     return res.status(400).json({
       message: normalizedKind === 'track-audio'
-        ? 'Unsupported audio type. Use mp3, wav, m4a, aac, ogg, or flac.'
+        ? 'Unsupported audio type. Only MP3 uploads are supported.'
         : 'Unsupported image type. Use jpg, png, webp, gif, or avif.'
     });
   }
@@ -571,73 +589,40 @@ app.post('/api/uploads/presign', async (req, res) => {
     trackId: safeTrackId || null,
     contentType: resolvedContentType,
     size: declaredSize || null,
-    preferLocal: Boolean(preferLocal),
     storage: getStorageStatus()
   });
 
-  if (supabase && !preferLocal) {
-    try {
-      const { data, error } = await supabase
-        .storage
-        .from(SUPABASE_BUCKET)
-        .createSignedUploadUrl(key, { upsert: true });
-      if (error || !data?.signedUrl) {
-        throw error || new Error('Supabase signed upload failed.');
-      }
-      logUpload('presign success', { key, storage: 'supabase' });
-      return res.json({
-        uploadUrl: data.signedUrl,
-        assetRef,
-        method: 'PUT',
-        headers: { 'x-upsert': 'true' },
-        cacheControl: SUPABASE_CACHE_CONTROL,
-        storage: 'supabase'
-      });
-    } catch (err) {
-      console.error('Supabase presign upload failed. Falling back:', err);
-      logUpload('presign failed', {
-        message: err?.message || String(err),
-        name: err?.name || null
-      });
-    }
+  if (!supabase) {
+    return res.status(503).json({
+      message: 'Supabase storage is required for uploads. Configure SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and SUPABASE_BUCKET.'
+    });
   }
 
-  if (s3Client && !preferLocal) {
-    try {
-      const command = new PutObjectCommand({
-        Bucket: S3_BUCKET,
-        Key: key,
-        ContentType: resolvedContentType
-      });
-      const uploadUrl = await getSignedUrl(s3Client, command, {
-        expiresIn: Number.isFinite(S3_SIGNED_URL_TTL) ? S3_SIGNED_URL_TTL : 900
-      });
-      logUpload('presign success', { key, storage: 's3' });
-      return res.json({
-        uploadUrl,
-        assetRef,
-        method: 'PUT',
-        headers: { 'Content-Type': resolvedContentType },
-        storage: 's3'
-      });
-    } catch (err) {
-      console.error('Presign upload failed. Falling back to local upload:', err);
-      logUpload('presign failed', {
-        message: err?.message || String(err),
-        name: err?.name || null,
-        code: err?.code || null
-      });
+  try {
+    const { data, error } = await supabase
+      .storage
+      .from(SUPABASE_BUCKET)
+      .createSignedUploadUrl(key, { upsert: true });
+    if (error || !data?.signedUrl) {
+      throw error || new Error('Supabase signed upload failed.');
     }
+    logUpload('presign success', { key, storage: 'supabase' });
+    return res.json({
+      uploadUrl: data.signedUrl,
+      assetRef,
+      method: 'PUT',
+      headers: { 'x-upsert': 'true' },
+      cacheControl: SUPABASE_CACHE_CONTROL,
+      storage: 'supabase'
+    });
+  } catch (err) {
+    console.error('Supabase presign upload failed:', err);
+    logUpload('presign failed', {
+      message: err?.message || String(err),
+      name: err?.name || null
+    });
+    return res.status(502).json({ message: 'Unable to create upload URL in Supabase storage.' });
   }
-
-  logUpload('presign fallback', { key, storage: 'local' });
-  return res.json({
-    uploadUrl: `/api/uploads/local?key=${encodeURIComponent(key)}&assetKind=${encodeURIComponent(normalizedKind)}`,
-    assetRef,
-    method: 'PUT',
-    headers: { 'Content-Type': resolvedContentType },
-    storage: 'local'
-  });
 });
 
 app.put('/api/uploads/local', async (req, res) => {
@@ -999,6 +984,21 @@ const normalizeCoverPath = (value) => {
   const normalized = String(value || '').trim();
   return normalized || null;
 };
+const normalizeTrackStoragePath = (value, fallback = '') => {
+  const primary = String(value || '').trim();
+  if (primary && isSafeAssetKey(primary)) {
+    return primary;
+  }
+
+  const legacy = String(fallback || '').trim();
+  if (isAssetRef(legacy)) {
+    const key = legacy.slice(ASSET_REF_PREFIX.length);
+    if (isSafeAssetKey(key)) {
+      return key;
+    }
+  }
+  return null;
+};
 const ownerUserIdFromData = (data) => {
   const projectData = data && typeof data === 'object' ? data : {};
   return normalizeOwnerUserId(projectData.ownerUserId, ADMIN_OWNER_USER_ID);
@@ -1152,6 +1152,13 @@ const buildProjectPayload = async (row, options = {}) => {
   };
 };
 
+const buildTrackStoragePayload = () => ({
+  provider: 'supabase',
+  bucket: SUPABASE_BUCKET,
+  public: SUPABASE_BUCKET_PUBLIC,
+  signedUrlTtl: Number.isFinite(SUPABASE_TRACK_URL_TTL) ? Math.max(60, Math.floor(SUPABASE_TRACK_URL_TTL)) : 3600
+});
+
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
@@ -1161,6 +1168,7 @@ app.get('/health', (_req, res) => {
     appUrl: APP_URL || null,
     supabaseAuthClientConfigured: hasSupabaseAuthClientConfig(),
     supabaseAdminConfigured: hasSupabaseAdminConfig(),
+    trackStorage: buildTrackStoragePayload(),
     allowedOrigins: Array.from(ALLOWED_ORIGINS)
   });
 });
@@ -1625,7 +1633,7 @@ app.post('/api/assets/sign', async (req, res) => {
       if (!key.includes(`/${safeProjectId}/`)) {
         continue;
       }
-      const isAudioKey = key.includes('/audio/') && key.includes(`/${safeProjectId}/`);
+      const isAudioKey = isAudioAssetKey(key) && key.includes(`/${safeProjectId}/`);
       if (!isUnlocked && isAudioKey) {
         continue;
       }
@@ -2595,17 +2603,34 @@ app.post('/api/projects/sync', async (req, res) => {
     await client.query('DELETE FROM tracks WHERE project_id = $1', [payload.projectId]);
 
     const trackRows = Array.isArray(tracks) ? tracks : [];
-    for (const track of trackRows) {
+    for (let index = 0; index < trackRows.length; index += 1) {
+      const track = trackRows[index] || {};
+      const trackId = String(track.trackId || '').trim();
+      if (!trackId) continue;
+
+      const trackNoValue = Number(track.trackNo ?? track.sortOrder ?? index + 1);
+      const trackNo = Number.isFinite(trackNoValue)
+        ? Math.max(1, Math.floor(trackNoValue))
+        : index + 1;
+      const sortOrderValue = Number(track.sortOrder ?? trackNo);
+      const sortOrder = Number.isFinite(sortOrderValue)
+        ? Math.max(0, Math.floor(sortOrderValue))
+        : trackNo;
+      const storagePath = normalizeTrackStoragePath(track.storagePath, track.mp3Url);
+      const legacyMp3Url = storagePath ? null : String(track.mp3Url || '').trim() || null;
+
       await client.query(
-        `INSERT INTO tracks (track_id, project_id, title, mp3_url, artwork_url, sort_order, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+        `INSERT INTO tracks (track_id, project_id, title, mp3_url, artwork_url, sort_order, track_no, storage_path, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
         [
-          track.trackId,
+          trackId,
           payload.projectId,
           track.title || 'Untitled',
-          track.mp3Url || null,
+          legacyMp3Url,
           track.artworkUrl || null,
-          track.sortOrder || 0
+          sortOrder,
+          trackNo,
+          storagePath
         ]
       );
     }
@@ -2666,21 +2691,38 @@ app.get('/api/projects/:slug', async (req, res) => {
 
     const row = projectResult.rows[0];
     const trackResult = await query(
-      'SELECT * FROM tracks WHERE project_id = $1 ORDER BY sort_order ASC',
+      'SELECT * FROM tracks WHERE project_id = $1 ORDER BY COALESCE(track_no, 0) ASC, COALESCE(sort_order, 0) ASC, created_at ASC',
       [row.project_id]
     );
 
     const project = await buildProjectPayload(row, { includeSignedCover: true });
 
-    const tracks = trackResult.rows.map((track) => ({
-      trackId: track.track_id,
-      projectId: track.project_id,
-      title: track.title,
-      mp3Url: track.mp3_url || '',
-      artworkUrl: track.artwork_url || '',
-      sortOrder: track.sort_order,
-      createdAt: track.created_at
-    }));
+    const tracks = trackResult.rows.map((track, index) => {
+      const storagePath = normalizeTrackStoragePath(track.storage_path, track.mp3_url);
+      const trackNoValue = Number(track.track_no ?? track.sort_order ?? index + 1);
+      const trackNo = Number.isFinite(trackNoValue)
+        ? Math.max(1, Math.floor(trackNoValue))
+        : index + 1;
+      const sortOrderValue = Number(track.sort_order ?? trackNo);
+      const sortOrder = Number.isFinite(sortOrderValue)
+        ? Math.max(0, Math.floor(sortOrderValue))
+        : trackNo;
+      const mp3Url = storagePath
+        ? createAssetRef(storagePath)
+        : String(track.mp3_url || '').trim();
+
+      return {
+        trackId: track.track_id,
+        projectId: track.project_id,
+        title: track.title,
+        trackNo,
+        storagePath: storagePath || '',
+        mp3Url: mp3Url || '',
+        artworkUrl: track.artwork_url || '',
+        sortOrder,
+        createdAt: track.created_at
+      };
+    });
 
     if (IS_DEV) {
       console.log('[DEV] project fetch', {
@@ -2700,7 +2742,12 @@ app.get('/api/projects/:slug', async (req, res) => {
       }
     }
 
-    return res.json({ success: true, project, tracks });
+    return res.json({
+      success: true,
+      project,
+      tracks,
+      trackStorage: buildTrackStoragePayload()
+    });
   } catch (err) {
     console.error('Project fetch failed:', err);
     return res.status(500).json({ message: 'Project fetch failed.' });
@@ -2713,7 +2760,7 @@ app.get('/api/pwa/manifest', async (req, res) => {
   const inferredPathSlug = requestedPath.startsWith('/tap-') ? normalizeSlugToken(requestedPath.slice(1)) : '';
   const slug = requestedSlug || inferredPathSlug;
   const requestVersion = normalizeManifestVersion(req.query.v);
-  const manifestVersion = requestVersion || normalizeManifestVersion(PWA_MANIFEST_VERSION) || '2026.02.17.2';
+  const manifestVersion = requestVersion || normalizeManifestVersion(PWA_MANIFEST_VERSION) || '2026.02.17.3';
   const iconVersionSuffix = encodeURIComponent(manifestVersion);
 
   let appName = PWA_APP_NAME;

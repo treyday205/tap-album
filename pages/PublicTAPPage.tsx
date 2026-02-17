@@ -6,8 +6,9 @@ import TAPRenderer from '../components/TAPRenderer';
 import { Api, API_BASE_URL } from '../services/api';
 import { ShieldAlert, Mail, ArrowRight, Loader2, CheckCircle2, XCircle, Key } from 'lucide-react';
 import { collectAssetRefs, resolveAssetUrl, isAssetRef } from '../services/assets';
-import { collectBankRefs, resolveBankUrls } from '../services/assetBank';
+import { collectBankRefs, resolveBankUrls, isBankRef } from '../services/assetBank';
 import { registerSW } from 'virtual:pwa-register';
+import { extractTrackStoragePath, resolveRuntimeTrackAudioUrl, type SignedTrackUrlCache, type TrackStorageConfig } from '../services/trackAudio';
 import {
   buildSupabaseEmailRedirectUrl,
   hasSupabaseAuthUrlState,
@@ -26,16 +27,37 @@ const scopedAuthEmailKey = (projectId: string) => `${AUTH_EMAIL_KEY}_${projectId
 const normalizeProjectId = (value?: string | null) => String(value || '').trim();
 const PUBLIC_CACHE_PREFIX = 'tap_public_cache_';
 const LAST_PUBLIC_SLUG_KEY = 'tap_last_public_slug';
+const DEFAULT_TRACK_STORAGE: TrackStorageConfig = {
+  bucket: 'tap-album',
+  isPublic: false,
+  signedUrlTtl: 3600
+};
+const normalizeTrackStorageConfig = (value: any): TrackStorageConfig => {
+  const bucket = String(value?.bucket || DEFAULT_TRACK_STORAGE.bucket).trim() || DEFAULT_TRACK_STORAGE.bucket;
+  const ttlValue = Number(value?.signedUrlTtl);
+  return {
+    bucket,
+    isPublic: value?.public === true,
+    signedUrlTtl: Number.isFinite(ttlValue) ? Math.max(60, Math.floor(ttlValue)) : DEFAULT_TRACK_STORAGE.signedUrlTtl
+  };
+};
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform?: string }>;
 };
 
+type PlayerState = {
+  isPlaying: boolean;
+  currentTrackId: string | null;
+};
+
+const AUTO_REFRESH_INTERVAL_MS = 60_000;
+
 const PublicTAPPage: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
   const location = useLocation();
-  const PWA_MANIFEST_VERSION = String(import.meta.env?.VITE_PWA_MANIFEST_VERSION || '2026.02.17.2').trim() || '2026.02.17.2';
+  const PWA_MANIFEST_VERSION = String(import.meta.env?.VITE_PWA_MANIFEST_VERSION || '2026.02.17.3').trim() || '2026.02.17.3';
   const PWA_ENV_VALUE = String(import.meta.env?.VITE_PWA_ENABLED || '').toLowerCase();
   const PWA_ENV_ENABLED = PWA_ENV_VALUE === 'true';
   const PWA_ENV_DISABLED = PWA_ENV_VALUE === 'false';
@@ -60,11 +82,20 @@ const PublicTAPPage: React.FC = () => {
 
   const [project, setProject] = useState<Project | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
+  const [trackStorage, setTrackStorage] = useState<TrackStorageConfig>(DEFAULT_TRACK_STORAGE);
   const [loading, setLoading] = useState(true);
   const [assetUrls, setAssetUrls] = useState<Record<string, string>>({});
+  const signedTrackAudioUrlsRef = useRef<SignedTrackUrlCache>({});
   const signedAssetRequestsRef = useRef(new Set<string>());
   const bankAssetRequestsRef = useRef(new Set<string>());
   const swRegisteredRef = useRef(false);
+  const viewLoggedRef = useRef<string | null>(null);
+  const refreshInFlightRef = useRef<{ slug: string; promise: Promise<void> } | null>(null);
+  const refreshIntervalRef = useRef<number | null>(null);
+  const serviceWorkerRegistrationRef = useRef<ServiceWorkerRegistration | null>(null);
+  const pendingHardReloadRef = useRef(false);
+  const playerStateRef = useRef<PlayerState>({ isPlaying: false, currentTrackId: null });
+  const [playerState, setPlayerState] = useState<PlayerState>({ isPlaying: false, currentTrackId: null });
   const [isOffline, setIsOffline] = useState(
     typeof navigator !== 'undefined' ? !navigator.onLine : false
   );
@@ -207,6 +238,59 @@ const PublicTAPPage: React.FC = () => {
     return `Email failed: ${message}`;
   };
 
+  const triggerHardReload = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    if (playerStateRef.current.isPlaying) {
+      pendingHardReloadRef.current = true;
+      if (IS_DEV) {
+        console.log('[DEBUG] delaying hard reload until playback ends');
+      }
+      return;
+    }
+    pendingHardReloadRef.current = false;
+    window.location.reload();
+  }, []);
+
+  const handlePlayerStateChange = useCallback((next: PlayerState) => {
+    playerStateRef.current = next;
+    setPlayerState((prev) => {
+      if (prev.isPlaying === next.isPlaying && prev.currentTrackId === next.currentTrackId) {
+        return prev;
+      }
+      return next;
+    });
+  }, []);
+
+  const updateServiceWorkerOnResume = useCallback(async () => {
+    if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
+    try {
+      const registration =
+        serviceWorkerRegistrationRef.current ||
+        (await navigator.serviceWorker.getRegistration()) ||
+        (await navigator.serviceWorker.ready.catch(() => null));
+      if (!registration) return;
+      serviceWorkerRegistrationRef.current = registration;
+      await registration.update();
+      if (registration.waiting) {
+        triggerHardReload();
+      }
+    } catch (err) {
+      if (IS_DEV) {
+        console.warn('[DEBUG] service worker update failed', err);
+      }
+    }
+  }, [triggerHardReload]);
+
+  useEffect(() => {
+    playerStateRef.current = playerState;
+    if (!playerState.isPlaying && pendingHardReloadRef.current) {
+      pendingHardReloadRef.current = false;
+      if (typeof window !== 'undefined') {
+        window.location.reload();
+      }
+    }
+  }, [playerState]);
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const updateOfflineState = () => setIsOffline(!navigator.onLine);
@@ -275,14 +359,33 @@ const PublicTAPPage: React.FC = () => {
     };
   }, [PWA_ENABLED, isPwaInstallRoute]);
 
-  useEffect(() => {
+  const refreshAlbumData = useCallback(async ({
+    initial = false,
+    reason = 'auto-refresh'
+  }: {
+    initial?: boolean;
+    reason?: string;
+  } = {}) => {
     if (!slug) return;
-    const loadProject = async () => {
-      setLoading(true);
+
+    const inFlight = refreshInFlightRef.current;
+    if (inFlight && inFlight.slug === slug) {
+      return inFlight.promise;
+    }
+
+    const run = (async () => {
+      if (initial) {
+        setLoading(true);
+      }
+
       try {
         const response = await Api.getProjectBySlug(slug);
         setProject(response.project);
         setTracks(response.tracks || []);
+        setTrackStorage(normalizeTrackStorageConfig(response?.trackStorage));
+        if (initial) {
+          signedTrackAudioUrlsRef.current = {};
+        }
         if (typeof window !== 'undefined' && response?.project?.slug) {
           const cacheKey = `${PUBLIC_CACHE_PREFIX}${response.project.slug}`;
           const cachePayload = {
@@ -299,44 +402,100 @@ const PublicTAPPage: React.FC = () => {
             // ignore cache write errors
           }
         }
-        StorageService.logEvent(response.project.projectId, EventType.VIEW, 'Page Load');
+        if (initial && response?.project?.projectId && viewLoggedRef.current !== response.project.projectId) {
+          viewLoggedRef.current = response.project.projectId;
+          StorageService.logEvent(response.project.projectId, EventType.VIEW, 'Page Load');
+        }
         if (IS_DEV) {
-          console.log('[DEBUG] project load (api)', {
+          console.log('[DEBUG] project refresh (api)', {
+            reason,
             projectId: response.project.projectId,
             slug: response.project.slug,
-            tracks: response.tracks?.length || 0,
-            project: response.project
+            tracks: response.tracks?.length || 0
           });
         }
       } catch (err) {
-        const p = StorageService.getProjectBySlug(slug);
-        if (p && p.published) {
-          setProject(p);
-          setTracks(StorageService.getTracks(p.projectId));
-          StorageService.logEvent(p.projectId, EventType.VIEW, 'Page Load');
-          if (typeof window !== 'undefined' && p?.slug) {
-            try {
-              localStorage.setItem(LAST_PUBLIC_SLUG_KEY, p.slug);
-            } catch {
-              // ignore cache write errors
-            }
-          }
-          if (IS_DEV) {
-            console.log('[DEBUG] project load (local)', {
-              projectId: p.projectId,
-              slug: p.slug,
-              tracks: StorageService.getTracks(p.projectId).length,
-              project: p
-            });
-          }
+        if (initial) {
+          setProject(null);
+          setTracks([]);
+          setTrackStorage(DEFAULT_TRACK_STORAGE);
+          signedTrackAudioUrlsRef.current = {};
+        }
+        if (IS_DEV) {
+          console.warn('[DEBUG] project refresh failed', { reason, err });
         }
       } finally {
-        setLoading(false);
+        if (initial) {
+          setLoading(false);
+        }
+      }
+    })().finally(() => {
+      if (refreshInFlightRef.current?.slug === slug) {
+        refreshInFlightRef.current = null;
+      }
+    });
+
+    refreshInFlightRef.current = { slug, promise: run };
+    return run;
+  }, [slug]);
+
+  useEffect(() => {
+    if (!slug) return;
+    void refreshAlbumData({ initial: true, reason: 'initial-load' });
+  }, [slug, refreshAlbumData]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined' || !slug) return;
+
+    const refreshOnResume = (reason: string) => {
+      if (document.visibilityState !== 'visible') return;
+      void updateServiceWorkerOnResume();
+      void refreshAlbumData({ reason });
+    };
+
+    const startVisibleInterval = () => {
+      if (refreshIntervalRef.current !== null) return;
+      refreshIntervalRef.current = window.setInterval(() => {
+        if (document.visibilityState === 'visible') {
+          void refreshAlbumData({ reason: 'visible-interval' });
+        }
+      }, AUTO_REFRESH_INTERVAL_MS);
+    };
+
+    const stopVisibleInterval = () => {
+      if (refreshIntervalRef.current === null) return;
+      window.clearInterval(refreshIntervalRef.current);
+      refreshIntervalRef.current = null;
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        startVisibleInterval();
+        refreshOnResume('visibilitychange-visible');
+      } else {
+        stopVisibleInterval();
       }
     };
 
-    loadProject();
-  }, [slug]);
+    const handleFocus = () => {
+      if (document.visibilityState === 'visible') {
+        refreshOnResume('window-focus');
+      }
+    };
+
+    if (document.visibilityState === 'visible') {
+      startVisibleInterval();
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      stopVisibleInterval();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [slug, refreshAlbumData, updateServiceWorkerOnResume]);
 
   useEffect(() => {
     if (!PWA_ENABLED || !isPwaInstallRoute || !project?.slug || !slug || typeof window === 'undefined') return;
@@ -462,6 +621,67 @@ const PublicTAPPage: React.FC = () => {
 
   const resolveAsset = useCallback((value: string) => resolveAssetUrl(value, assetUrls), [assetUrls]);
 
+  const resolveTrackAudioForPlayback = useCallback(
+    async (
+      track: Track,
+      options?: { forceRefresh?: boolean; reason?: 'manual' | 'probe' | 'stalled' | 'waiting' | 'error' }
+    ) => {
+      const storagePath = extractTrackStoragePath(track);
+      const trackId = String(track.trackId || '').trim();
+      const cacheKey = trackId || storagePath;
+      const reason = options?.reason || 'manual';
+      const allowRefreshWhilePlaying = reason === 'stalled' || reason === 'waiting' || reason === 'error';
+      const isCurrentTrackPlaying =
+        playerStateRef.current.isPlaying &&
+        Boolean(playerStateRef.current.currentTrackId) &&
+        playerStateRef.current.currentTrackId === trackId;
+      const rawMp3Value = String(track.mp3Url || '').trim();
+
+      if (!storagePath) {
+        let fallback = resolveAsset(rawMp3Value).trim();
+        if (!fallback && isBankRef(rawMp3Value)) {
+          const bankResolved = await resolveBankUrls([rawMp3Value]);
+          const bankUrl = String(bankResolved[rawMp3Value] || '').trim();
+          if (bankUrl) {
+            setAssetUrls((prev) => ({ ...prev, ...bankResolved }));
+            fallback = bankUrl;
+          } else {
+            throw new Error('Track is local-only on this device. Upload to Supabase to publish.');
+          }
+        }
+        if (!fallback) {
+          throw new Error('Track audio is missing.');
+        }
+        return fallback;
+      }
+
+      if (isCurrentTrackPlaying && !allowRefreshWhilePlaying) {
+        const cached = signedTrackAudioUrlsRef.current[cacheKey];
+        if (cached?.url) {
+          return cached.url;
+        }
+        const fallback = resolveAsset(rawMp3Value).trim();
+        if (fallback) {
+          return fallback;
+        }
+      }
+
+      const resolved = await resolveRuntimeTrackAudioUrl({
+        track,
+        storage: trackStorage,
+        cache: signedTrackAudioUrlsRef.current,
+        forceRefresh: Boolean(options?.forceRefresh) && (!isCurrentTrackPlaying || allowRefreshWhilePlaying)
+      });
+      signedTrackAudioUrlsRef.current[cacheKey] = {
+        url: resolved.url,
+        expiresAt: resolved.expiresAt,
+        storagePath: resolved.storagePath || storagePath
+      };
+      return resolved.url;
+    },
+    [resolveAsset, trackStorage]
+  );
+
   const ensureSignedAssets = async (refs: string[]) => {
     if (!project) return;
     const token = getAuthToken(project.projectId);
@@ -509,9 +729,12 @@ const PublicTAPPage: React.FC = () => {
 
   useEffect(() => {
     if (!project || !isUnlocked) return;
+    const legacyTrackAudioValues = tracks
+      .filter((track) => !extractTrackStoragePath(track))
+      .map((track) => track.mp3Url);
     const values = [
       project.coverImageUrl,
-      ...tracks.map((track) => track.mp3Url),
+      ...legacyTrackAudioValues,
       ...tracks.map((track) => track.artworkUrl)
     ];
     const signedRefs = collectAssetRefs(values);
@@ -1268,6 +1491,8 @@ const PublicTAPPage: React.FC = () => {
           showAllTracks={true}
           useGoLiveHeader={isPublicGoLiveRoute}
           resolveAssetUrl={resolveAsset}
+          resolveTrackAudioUrl={resolveTrackAudioForPlayback}
+          onPlayerStateChange={handlePlayerStateChange}
           showInstallButton={showInstallButton}
           onInstallClick={handleInstallClick}
         />

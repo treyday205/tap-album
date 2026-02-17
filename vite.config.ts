@@ -23,6 +23,7 @@ export default defineConfig(({ mode }) => {
   const proxyTarget = /^https?:\/\//i.test(apiBaseUrl)
     ? apiBaseUrl
     : 'http://localhost:4000';
+  const swCacheVersion = env.VITE_SW_CACHE_VERSION || '2026.02.17.3';
 
   return {
     server: {
@@ -76,7 +77,7 @@ export default defineConfig(({ mode }) => {
               urlPattern: ({ request }) => request.destination === 'image',
               handler: 'CacheFirst',
               options: {
-                cacheName: 'tap-images',
+                cacheName: `tap-images-${swCacheVersion}`,
                 expiration: {
                   maxEntries: 80,
                   maxAgeSeconds: 60 * 60 * 24 * 30
@@ -90,7 +91,7 @@ export default defineConfig(({ mode }) => {
               urlPattern: ({ url }) => url.origin === 'https://fonts.googleapis.com',
               handler: 'StaleWhileRevalidate',
               options: {
-                cacheName: 'tap-google-fonts-css',
+                cacheName: `tap-google-fonts-css-${swCacheVersion}`,
                 cacheableResponse: {
                   statuses: [0, 200]
                 }
@@ -100,7 +101,7 @@ export default defineConfig(({ mode }) => {
               urlPattern: ({ url }) => url.origin === 'https://fonts.gstatic.com',
               handler: 'CacheFirst',
               options: {
-                cacheName: 'tap-google-fonts',
+                cacheName: `tap-google-fonts-${swCacheVersion}`,
                 expiration: {
                   maxEntries: 16,
                   maxAgeSeconds: 60 * 60 * 24 * 365
@@ -114,7 +115,7 @@ export default defineConfig(({ mode }) => {
               urlPattern: ({ url }) => url.origin === 'https://cdn.tailwindcss.com',
               handler: 'StaleWhileRevalidate',
               options: {
-                cacheName: 'tap-tailwind-cdn',
+                cacheName: `tap-tailwind-cdn-${swCacheVersion}`,
                 cacheableResponse: {
                   statuses: [0, 200]
                 }

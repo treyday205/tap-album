@@ -9,7 +9,7 @@ import { StorageService } from '../services/storage';
 import { Api } from '../services/api';
 import { Project, Track, ProjectLink, LinkCategory } from '../types';
 import { GoogleGenAI, Type } from "@google/genai";
-import { collectAssetRefs, isAssetRef, resolveAssetUrl } from '../services/assets';
+import { collectAssetRefs, getAssetKey, isAssetRef, resolveAssetUrl } from '../services/assets';
 import { collectBankRefs, resolveBankUrls, saveBankAsset } from '../services/assetBank';
 import ResponsiveImage from '../components/ResponsiveImage';
 
@@ -279,6 +279,12 @@ const EditorPage: React.FC = () => {
       reader.readAsDataURL(file);
     });
 
+  const storagePathFromTrackValue = (value: string | undefined | null) => {
+    const trimmed = String(value || '').trim();
+    if (!isAssetRef(trimmed)) return '';
+    return getAssetKey(trimmed);
+  };
+
   const storeLocalImageAsset = async (
     file: File,
     meta: { projectId: string; kind: string; trackId?: string }
@@ -475,6 +481,8 @@ const EditorPage: React.FC = () => {
             projectId: projectId!,
             title: autoTitle(file.name),
             mp3Url: '',
+            storagePath: '',
+            trackNo: tracks.length + newTracks.length + 1,
             sortOrder: tracks.length + newTracks.length + 1,
             createdAt: new Date().toISOString()
           };
@@ -507,17 +515,25 @@ const EditorPage: React.FC = () => {
           }
           handleUpdateTrack(trackId, {
             mp3Url: assetRef,
+            storagePath: storagePathFromTrackValue(assetRef),
             title: autoTitle(file.name)
           });
           ensureSignedAssets([assetRef]);
-        } catch (err) {
+          setUploadError(null);
+        } catch (err: any) {
           try {
             const localRef = await storeLocalAudioAsset(file, { projectId, trackId });
             handleUpdateTrack(trackId, {
               mp3Url: localRef,
+              storagePath: '',
               title: autoTitle(file.name)
             });
-            setUploadError(null);
+            const fallbackMessage = String(err?.message || '').trim();
+            if (fallbackMessage) {
+              setUploadError(`Supabase upload failed, using local fallback: ${fallbackMessage}`);
+            } else {
+              setUploadError('Supabase upload failed, using local fallback.');
+            }
           } catch (fallbackErr: any) {
             throw fallbackErr || err;
           }
@@ -679,6 +695,8 @@ const EditorPage: React.FC = () => {
       projectId: projectId!,
       title: 'New Track',
       mp3Url: '',
+      storagePath: '',
+      trackNo: tracks.length + 1,
       sortOrder: tracks.length + 1,
       createdAt: new Date().toISOString()
     };
@@ -693,12 +711,23 @@ const EditorPage: React.FC = () => {
   };
 
   const handleUpdateTrack = (id: string, updates: Partial<Track>) => {
-    const updatedTracks = tracks.map(t => t.trackId === id ? { ...t, ...updates } : t);
+    const normalizedUpdates: Partial<Track> = { ...updates };
+    if (Object.prototype.hasOwnProperty.call(updates, 'mp3Url')) {
+      normalizedUpdates.storagePath = storagePathFromTrackValue(updates.mp3Url) || '';
+    }
+
+    const updatedTracks = tracks.map((t, index) => {
+      if (t.trackId !== id) return t;
+      const nextTrack = { ...t, ...normalizedUpdates };
+      const nextTrackNo = Number(nextTrack.trackNo ?? nextTrack.sortOrder ?? index + 1);
+      nextTrack.trackNo = Number.isFinite(nextTrackNo) ? Math.max(1, Math.floor(nextTrackNo)) : index + 1;
+      return nextTrack;
+    });
     setTracks(updatedTracks);
     const track = updatedTracks.find(t => t.trackId === id);
     if (track) StorageService.saveTrack(track);
 
-    if (updates.mp3Url && updates.mp3Url.includes('spotify.com') && !updates.mp3Url.includes('p.scdn.co')) {
+    if (normalizedUpdates.mp3Url && normalizedUpdates.mp3Url.includes('spotify.com') && !normalizedUpdates.mp3Url.includes('p.scdn.co')) {
       const targetTrack = updatedTracks.find(t => t.trackId === id);
       if (targetTrack) handleMagicResolve(targetTrack);
     }
@@ -851,9 +880,9 @@ const EditorPage: React.FC = () => {
   );
 
   const DevicePreviewSkeleton = () => (
-    <div className="relative hidden lg:flex flex-col w-[440px] p-10 items-center justify-center sticky top-0 h-[calc(100vh-73px)]">
+    <div className="relative flex flex-col w-full lg:w-[440px] px-4 py-8 lg:p-10 items-center justify-center lg:sticky lg:top-0 lg:h-[calc(100vh-73px)] border-t border-slate-800/60 lg:border-t-0">
       <div className="mb-6 h-3 w-40 bg-slate-800/60 rounded-full animate-pulse" />
-      <div className="w-[300px] h-[600px] bg-slate-900/70 rounded-[50px] border border-slate-800/60 animate-pulse" />
+      <div className="w-[268px] h-[540px] lg:w-[300px] lg:h-[600px] bg-slate-900/70 rounded-[44px] lg:rounded-[50px] border border-slate-800/60 animate-pulse" />
     </div>
   );
 
@@ -865,7 +894,7 @@ const EditorPage: React.FC = () => {
       <audio ref={audioPreviewRef} onEnded={stopPreview} className="hidden" />
       <input type="file" ref={projectImageInputRef} className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, 'PROJECT_IMAGE')} />
       <input type="file" ref={trackImageInputRef} className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, 'TRACK_IMAGE')} />
-      <input type="file" ref={trackAudioInputRef} className="hidden" accept="audio/*" multiple onChange={(e) => handleFileUpload(e, 'TRACK_AUDIO')} />
+      <input type="file" ref={trackAudioInputRef} className="hidden" accept=".mp3,audio/mpeg" multiple onChange={(e) => handleFileUpload(e, 'TRACK_AUDIO')} />
 
       <div className="sticky top-0 z-30 bg-slate-950/80 backdrop-blur-md border-b border-slate-800 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-4">
@@ -880,7 +909,7 @@ const EditorPage: React.FC = () => {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <button onClick={() => setShowMobilePreview(!showMobilePreview)} className={`hidden lg:flex items-center gap-2 px-4 py-2 rounded-full text-sm font-bold transition-all ${showMobilePreview ? 'bg-slate-800 text-green-400' : 'bg-slate-900 text-slate-500'}`}>
+          <button onClick={() => setShowMobilePreview(!showMobilePreview)} className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm font-bold transition-all ${showMobilePreview ? 'bg-slate-800 text-green-400' : 'bg-slate-900 text-slate-500'}`}>
             <MonitorSmartphone size={16} />
             Device View
           </button>
@@ -891,7 +920,7 @@ const EditorPage: React.FC = () => {
         </div>
       </div>
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 flex-col lg:flex-row lg:overflow-hidden">
         <div className={`flex-1 overflow-y-auto px-6 py-8 ${showMobilePreview ? 'lg:border-r border-slate-800' : ''}`}>
           <div className="max-w-3xl mx-auto">
             <div className="flex border-b border-slate-800 mb-8 sticky top-0 bg-slate-950 z-20">

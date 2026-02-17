@@ -55,7 +55,10 @@ const EditorTracklistTab: React.FC<EditorTracklistTabProps> = ({
         const isUploading = uploadingTrackId === track.trackId;
         const uploadPercent = uploadProgress[track.trackId] ?? 0;
         const isSecureAudio = isAssetRef(track.mp3Url);
+        const hasStoragePath = String(track.storagePath || '').trim().length > 0;
+        const isDataAudio = track.mp3Url.startsWith('data:');
         const isBankAudio = track.mp3Url.startsWith('bank:');
+        const isLocalOnlyAudio = (isDataAudio || isBankAudio) && !hasStoragePath;
         const displayMp3Value = track.mp3Url.startsWith('data:')
           ? 'Local Audio File'
           : isBankAudio
@@ -97,6 +100,11 @@ const EditorTracklistTab: React.FC<EditorTracklistTabProps> = ({
               {isUploading && (
                 <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">
                   Uploading {uploadPercent}%
+                </div>
+              )}
+              {isLocalOnlyAudio && (
+                <div className="inline-flex items-center rounded-full border border-amber-400/40 bg-amber-500/10 px-3 py-1 text-[10px] font-black uppercase tracking-widest text-amber-300">
+                  Local Only - Needs Supabase Upload
                 </div>
               )}
               <div className="flex items-center justify-between">

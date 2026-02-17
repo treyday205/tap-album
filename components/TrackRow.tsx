@@ -9,13 +9,14 @@ interface TrackRowProps {
   trackNumber?: number;
   subtext?: string;
   audioUrl?: string;
+  canPlay?: boolean;
   isPlaying: boolean;
   isActive: boolean;
   onTogglePlay: (track: Track) => void;
   isPreview?: boolean;
 }
 
-const TrackRow: React.FC<TrackRowProps> = ({ track, artworkUrl = '', trackNumber, subtext = '', audioUrl = '', isPlaying, isActive, onTogglePlay, isPreview = false }) => {
+const TrackRow: React.FC<TrackRowProps> = ({ track, artworkUrl = '', trackNumber, subtext = '', audioUrl = '', canPlay, isPlaying, isActive, onTogglePlay, isPreview = false }) => {
   const url = (audioUrl || '').trim();
   const artworkSrc = (artworkUrl || '').trim();
 
@@ -31,19 +32,20 @@ const TrackRow: React.FC<TrackRowProps> = ({ track, artworkUrl = '', trackNumber
     url.includes('.flac') ||
     ((url.startsWith('http') || url.startsWith('/')) && !url.includes('open.spotify.com'))
   );
+  const isPlayable = typeof canPlay === 'boolean' ? canPlay : isDirectAudio;
 
   const previewIdleClass = 'bg-slate-900/30 border border-slate-800/70 hover:bg-slate-900/55';
   const idleClass = 'border border-transparent';
   const activeClass = 'bg-slate-900/85 border border-slate-700';
 
   const handleRowClick = () => {
-    if (!isDirectAudio) return;
+    if (!isPlayable) return;
     onTogglePlay(track);
   };
 
   const showNumber = typeof trackNumber === 'number' && !isPreview;
   const playVisibilityClass = 'opacity-100 pointer-events-auto';
-  const interactivityClass = isDirectAudio
+  const interactivityClass = isPlayable
     ? 'cursor-pointer active:scale-[0.995] active:bg-slate-900/80'
     : 'cursor-default';
 
@@ -101,11 +103,11 @@ const TrackRow: React.FC<TrackRowProps> = ({ track, artworkUrl = '', trackNumber
         <button
           onClick={(e) => {
             e.stopPropagation();
-            if (isDirectAudio) onTogglePlay(track);
+            if (isPlayable) onTogglePlay(track);
           }}
-          disabled={!isDirectAudio}
+          disabled={!isPlayable}
           className={`w-12 h-12 rounded-full flex items-center justify-center transition-all flex-shrink-0 touch-manipulation ${playVisibilityClass} ${
-            !isDirectAudio 
+            !isPlayable 
               ? 'bg-slate-800 text-slate-600 cursor-not-allowed opacity-40' 
               : 'bg-green-500 active:scale-95 text-black shadow-lg shadow-green-500/20'
           }`}

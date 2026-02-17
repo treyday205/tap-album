@@ -61,6 +61,8 @@ export interface Track {
   projectId: string;
   title: string;
   mp3Url: string;
+  storagePath?: string;
+  trackNo?: number;
   artworkUrl?: string;
   sortOrder: number;
   createdAt: string;
