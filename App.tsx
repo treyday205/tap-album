@@ -13,6 +13,7 @@ const WalletPage = lazy(() => import('./pages/WalletPage'));
 const ADMIN_ENTRY_PATH = '/control-admin';
 const ADMIN_DASHBOARD_PATH = '/control-admin/dashboard';
 const ADMIN_EDITOR_BASE_PATH = '/control-admin/dashboard/edit';
+const DEFAULT_ADMIN_ROOT_HOSTS = 'tap-album-production-bfdb.up.railway.app';
 
 const isAdminSession = () =>
   Boolean(localStorage.getItem('tap_admin_token')) ||
@@ -24,6 +25,20 @@ const isStandalonePwa = () => {
     window.matchMedia('(display-mode: standalone)').matches ||
     (window.navigator as any)?.standalone === true
   );
+};
+
+const shouldUseAdminRoot = () => {
+  if (typeof window === 'undefined') return false;
+  const mode = String(import.meta.env?.VITE_ROOT_ADMIN_MODE || '').trim().toLowerCase();
+  if (mode === 'admin' || mode === 'true') return true;
+  if (mode === 'public' || mode === 'false') return false;
+
+  const configuredHosts = String(import.meta.env?.VITE_ROOT_ADMIN_HOSTS || DEFAULT_ADMIN_ROOT_HOSTS)
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+  if (configuredHosts.length === 0) return false;
+  return configuredHosts.includes(window.location.hostname.toLowerCase());
 };
 
 const resolvePublicPerfFlag = () => {
@@ -77,6 +92,23 @@ const LegacyDashboardEditRoute = () => {
   return <Navigate to={`${ADMIN_EDITOR_BASE_PATH}/${projectId}`} replace />;
 };
 
+const RootEntryRoute = () => {
+  if (isStandalonePwa()) {
+    return <LandingPage />;
+  }
+  if (shouldUseAdminRoot()) {
+    return <AdminEntryRoute />;
+  }
+  return <LandingPage />;
+};
+
+const FeaturesRoute = () => {
+  if (shouldUseAdminRoot()) {
+    return <Navigate to="/" replace />;
+  }
+  return <LandingPage />;
+};
+
 const PublicTAPRoute = () => {
   const [usePerf] = useState(resolvePublicPerfFlag);
   const Page = usePerf ? PublicTAPPagePerf : PublicTAPPage;
@@ -106,8 +138,8 @@ const App: React.FC = () => {
         <Suspense fallback={<RouteFallback />}>
           <Routes>
             {/* Public Marketing Entry (Root) */}
-            <Route path="/" element={<LandingPage />} />
-            <Route path="/features" element={<LandingPage />} />
+            <Route path="/" element={<RootEntryRoute />} />
+            <Route path="/features" element={<FeaturesRoute />} />
 
             {/* Non-Public Admin Entry */}
             <Route path={ADMIN_ENTRY_PATH} element={<AdminEntryRoute />} />
