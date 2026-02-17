@@ -6,6 +6,9 @@ const ASSET_REF_PREFIX = 'asset:';
 const DEFAULT_BUCKET = 'tap-album';
 const DEFAULT_SIGNED_URL_TTL_SECONDS = 3600;
 const SIGNED_URL_REFRESH_BUFFER_MS = 30 * 1000;
+const SUPABASE_STORAGE_CONFIG_ERROR_CODE = 'SUPABASE_STORAGE_CONFIG_MISSING';
+const GENERIC_PLAYBACK_CONFIG_ERROR =
+  'Audio playback is temporarily unavailable. Please try again soon.';
 
 export type TrackStorageConfig = {
   bucket?: string;
@@ -18,7 +21,35 @@ export type SignedTrackUrlCache = Record<
   { url: string; expiresAt: number; storagePath: string }
 >;
 
+type TrackAudioError = Error & { code?: string };
+
 let fallbackStorageClient: SupabaseClient | null | undefined;
+
+const createSupabaseStorageConfigError = (): TrackAudioError => {
+  const error = new Error('Supabase storage client is not configured.') as TrackAudioError;
+  error.code = SUPABASE_STORAGE_CONFIG_ERROR_CODE;
+  return error;
+};
+
+export const isSupabaseStorageConfigError = (value: unknown): boolean => {
+  const errorCode = String((value as { code?: string } | null)?.code || '').trim();
+  if (errorCode === SUPABASE_STORAGE_CONFIG_ERROR_CODE) return true;
+  const message = String((value as { message?: string } | null)?.message || '')
+    .trim()
+    .toLowerCase();
+  return (
+    message.includes('supabase storage client is not configured') ||
+    message.includes('supabase storage is not configured')
+  );
+};
+
+export const toSafeTrackPlaybackErrorMessage = (value: unknown): string => {
+  if (isSupabaseStorageConfigError(value)) {
+    return GENERIC_PLAYBACK_CONFIG_ERROR;
+  }
+  const message = String((value as { message?: string } | null)?.message || '').trim();
+  return message || 'Unable to play this track right now.';
+};
 
 const getStorageClient = (): SupabaseClient | null => {
   if (supabaseAuthClient) {
@@ -92,7 +123,7 @@ export const resolveRuntimeTrackAudioUrl = async ({
 
   const client = getStorageClient();
   if (!client) {
-    throw new Error('Supabase storage client is not configured.');
+    throw createSupabaseStorageConfigError();
   }
 
   if (isPublic) {

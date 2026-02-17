@@ -6,34 +6,44 @@ const normalizeUrl = (value: unknown): string => {
   return raw.replace(/\/+$/g, '');
 };
 
-const readEnvValue = (key: string): string => {
-  const processValue = (process.env as Record<string, string | undefined> | undefined)?.[key];
-  if (processValue) return String(processValue).trim();
+const readClientEnvValue = (key: string): string => {
   const importMetaValue = (import.meta as any)?.env?.[key];
   if (importMetaValue) return String(importMetaValue).trim();
   return '';
 };
 
-const firstEnv = (keys: string[]): string => {
+const firstClientEnv = (keys: string[]): string => {
   for (const key of keys) {
-    const value = readEnvValue(key);
+    const value = readClientEnvValue(key);
     if (value) return value;
   }
   return '';
 };
 
-export const SUPABASE_URL = normalizeUrl(
-  firstEnv(['VITE_SUPABASE_URL', 'SUPABASE_URL'])
-);
+const parseOptionalBoolean = (value: string): boolean | null => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized === 'true') return true;
+  if (normalized === 'false') return false;
+  return null;
+};
 
-export const SUPABASE_ANON_KEY = firstEnv([
+export const SUPABASE_URL = normalizeUrl(readClientEnvValue('VITE_SUPABASE_URL'));
+
+export const SUPABASE_ANON_KEY = firstClientEnv([
   'VITE_SUPABASE_ANON_KEY',
-  'VITE_SUPABASE_PUBLISHABLE_KEY',
-  'SUPABASE_ANON_KEY',
-  'SUPABASE_PUBLISHABLE_KEY'
+  'VITE_SUPABASE_PUBLISHABLE_KEY'
 ]);
 
-export const isSupabaseAuthEnabled = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+export const SUPABASE_STORAGE_BUCKET =
+  firstClientEnv(['VITE_SUPABASE_STORAGE_BUCKET']) || 'tap-album';
+
+export const SUPABASE_BUCKET_PUBLIC = parseOptionalBoolean(
+  readClientEnvValue('VITE_SUPABASE_BUCKET_PUBLIC')
+);
+
+export const isSupabaseStorageConfigured = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+export const isSupabaseAuthEnabled = isSupabaseStorageConfigured;
 
 export const supabaseAuthClient = isSupabaseAuthEnabled
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {

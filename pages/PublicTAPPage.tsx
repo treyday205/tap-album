@@ -8,11 +8,20 @@ import { ShieldAlert, Mail, ArrowRight, Loader2, CheckCircle2, XCircle, Key } fr
 import { collectAssetRefs, resolveAssetUrl, isAssetRef } from '../services/assets';
 import { collectBankRefs, resolveBankUrls, isBankRef } from '../services/assetBank';
 import { registerSW } from 'virtual:pwa-register';
-import { extractTrackStoragePath, resolveRuntimeTrackAudioUrl, type SignedTrackUrlCache, type TrackStorageConfig } from '../services/trackAudio';
+import {
+  extractTrackStoragePath,
+  isSupabaseStorageConfigError,
+  resolveRuntimeTrackAudioUrl,
+  type SignedTrackUrlCache,
+  type TrackStorageConfig
+} from '../services/trackAudio';
 import {
   buildSupabaseEmailRedirectUrl,
   hasSupabaseAuthUrlState,
+  isSupabaseStorageConfigured,
   isSupabaseAuthEnabled,
+  SUPABASE_BUCKET_PUBLIC,
+  SUPABASE_STORAGE_BUCKET,
   supabaseAuthClient
 } from '../services/supabaseAuth';
 
@@ -28,16 +37,22 @@ const normalizeProjectId = (value?: string | null) => String(value || '').trim()
 const PUBLIC_CACHE_PREFIX = 'tap_public_cache_';
 const LAST_PUBLIC_SLUG_KEY = 'tap_last_public_slug';
 const DEFAULT_TRACK_STORAGE: TrackStorageConfig = {
-  bucket: 'tap-album',
-  isPublic: false,
+  bucket: SUPABASE_STORAGE_BUCKET || 'tap-album',
+  isPublic: SUPABASE_BUCKET_PUBLIC === true,
   signedUrlTtl: 3600
 };
 const normalizeTrackStorageConfig = (value: any): TrackStorageConfig => {
   const bucket = String(value?.bucket || DEFAULT_TRACK_STORAGE.bucket).trim() || DEFAULT_TRACK_STORAGE.bucket;
   const ttlValue = Number(value?.signedUrlTtl);
+  const isPublicValue =
+    typeof value?.public === 'boolean'
+      ? value.public
+      : typeof value?.isPublic === 'boolean'
+        ? value.isPublic
+        : DEFAULT_TRACK_STORAGE.isPublic;
   return {
     bucket,
-    isPublic: value?.public === true,
+    isPublic: isPublicValue,
     signedUrlTtl: Number.isFinite(ttlValue) ? Math.max(60, Math.floor(ttlValue)) : DEFAULT_TRACK_STORAGE.signedUrlTtl
   };
 };
@@ -655,6 +670,13 @@ const PublicTAPPage: React.FC = () => {
         return fallback;
       }
 
+      if (!isSupabaseStorageConfigured) {
+        if (IS_DEV) {
+          console.warn('[AUDIO] Supabase client config missing for storage playback.');
+        }
+        throw new Error('Audio playback is temporarily unavailable. Please try again soon.');
+      }
+
       if (isCurrentTrackPlaying && !allowRefreshWhilePlaying) {
         const cached = signedTrackAudioUrlsRef.current[cacheKey];
         if (cached?.url) {
@@ -666,12 +688,20 @@ const PublicTAPPage: React.FC = () => {
         }
       }
 
-      const resolved = await resolveRuntimeTrackAudioUrl({
-        track,
-        storage: trackStorage,
-        cache: signedTrackAudioUrlsRef.current,
-        forceRefresh: Boolean(options?.forceRefresh) && (!isCurrentTrackPlaying || allowRefreshWhilePlaying)
-      });
+      let resolved;
+      try {
+        resolved = await resolveRuntimeTrackAudioUrl({
+          track,
+          storage: trackStorage,
+          cache: signedTrackAudioUrlsRef.current,
+          forceRefresh: Boolean(options?.forceRefresh) && (!isCurrentTrackPlaying || allowRefreshWhilePlaying)
+        });
+      } catch (error) {
+        if (isSupabaseStorageConfigError(error)) {
+          throw new Error('Audio playback is temporarily unavailable. Please try again soon.');
+        }
+        throw error;
+      }
       signedTrackAudioUrlsRef.current[cacheKey] = {
         url: resolved.url,
         expiresAt: resolved.expiresAt,

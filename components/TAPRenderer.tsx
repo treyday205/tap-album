@@ -3,6 +3,7 @@ import React, { useEffect, useState, useRef, memo } from 'react';
 import { Music2, Instagram, Twitter, Video, Facebook, Play, Pause } from 'lucide-react';
 import { Project, Track, EventType } from '../types';
 import { StorageService } from '../services/storage';
+import { toSafeTrackPlaybackErrorMessage } from '../services/trackAudio';
 import TrackRow from './TrackRow';
 import GoLiveAlbumHeader from './GoLiveAlbumHeader';
 import ResponsiveImage from './ResponsiveImage';
@@ -497,7 +498,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
       logAudioEvent('play', audio, { reason: 'user-toggle' });
       if (!isPreview) StorageService.logEvent(project.projectId, EventType.TRACK_PLAY, track.title);
     } catch (err: any) {
-      const message = String(err?.message || 'Unable to play this track right now.');
+      const message = toSafeTrackPlaybackErrorMessage(err);
       setPlaybackError(message);
       setIsPlaying(false);
       clearStallRecoveryTimer();
