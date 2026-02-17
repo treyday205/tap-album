@@ -67,8 +67,11 @@ const request = async (path: string, options: RequestInit = {}) => {
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const message = data?.message || 'Request failed.';
-    throw new Error(message);
+    const message = String(data?.message || `Request failed (${res.status}).`).trim();
+    const error = new Error(message) as Error & { status?: number; body?: unknown };
+    error.status = res.status;
+    error.body = data;
+    throw error;
   }
   return data;
 };

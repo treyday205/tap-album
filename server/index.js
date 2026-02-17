@@ -708,7 +708,30 @@ app.put('/api/uploads/local', async (req, res) => {
   }
 });
 
-const normalizeEmail = (email) => email.trim().toLowerCase();
+const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const isValidEmail = (email) => EMAIL_REGEX.test(email);
+const toErrorMessage = (value, fallback = '') => {
+  if (!value) return fallback;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed || fallback;
+  }
+  if (value instanceof Error) {
+    const trimmed = String(value.message || '').trim();
+    return trimmed || fallback;
+  }
+  if (typeof value === 'object') {
+    const nested = value.error;
+    if (nested) {
+      const nestedMessage = toErrorMessage(nested, '');
+      if (nestedMessage) return nestedMessage;
+    }
+    const message = String(value.message || value.name || '').trim();
+    if (message) return message;
+  }
+  return fallback;
+};
 const generateCode = () => String(Math.floor(100000 + Math.random() * 900000));
 
 const query = (text, params, client) => {
@@ -1322,21 +1345,27 @@ app.post('/api/auth/supabase/exchange', async (req, res) => {
 
 app.post('/api/auth/request-magic', async (req, res) => {
   const { email, projectId, slug } = req.body || {};
-  if (!email || !projectId || !slug) {
+  const normalizedEmail = normalizeEmail(email);
+  const normalizedProjectId = String(projectId || '').trim();
+  const normalizedSlug = String(slug || '').trim();
+  if (!normalizedEmail || !normalizedProjectId || !normalizedSlug) {
     return res.status(400).json({ message: 'Email, projectId, and slug are required.' });
+  }
+  if (!isValidEmail(normalizedEmail)) {
+    return res.status(400).json({ message: 'Enter a valid email address.' });
   }
 
   const verificationId = crypto.randomUUID();
   const code = generateCode();
   const expiresAt = new Date(Date.now() + MAGIC_TTL_MS);
-  const normalizedEmail = normalizeEmail(email);
+  let deliveryAttempted = false;
 
   try {
-    await query('DELETE FROM magic_links WHERE project_id = $1 AND email = $2', [projectId, normalizedEmail]);
+    await query('DELETE FROM magic_links WHERE project_id = $1 AND email = $2', [normalizedProjectId, normalizedEmail]);
     await query(
       `INSERT INTO magic_links (id, project_id, email, code, expires_at)
        VALUES ($1, $2, $3, $4, $5)`,
-      [verificationId, projectId, normalizedEmail, code, expiresAt]
+      [verificationId, normalizedProjectId, normalizedEmail, code, expiresAt]
     );
 
     const requestOrigin = resolveRequestOrigin(req);
@@ -1344,10 +1373,17 @@ app.post('/api/auth/request-magic', async (req, res) => {
     if (!baseUrl) {
       return res.status(500).json({ message: 'APP_URL is not configured.' });
     }
-    const magicLink = `${baseUrl}/${slug}?verify=${verificationId}&code=${code}&projectId=${encodeURIComponent(projectId)}`;
+    const magicLink = `${baseUrl}/${normalizedSlug}?verify=${verificationId}&code=${code}&projectId=${encodeURIComponent(normalizedProjectId)}`;
 
     if (resend && RESEND_FROM) {
-      await resend.emails.send({
+      deliveryAttempted = true;
+      console.log('[EMAIL] request-magic send start', {
+        projectId: normalizedProjectId,
+        slug: normalizedSlug,
+        from: RESEND_FROM,
+        to: normalizedEmail
+      });
+      const resendResponse = await resend.emails.send({
         from: RESEND_FROM,
         to: normalizedEmail,
         subject: 'Your TAP access link',
@@ -1363,6 +1399,27 @@ app.post('/api/auth/request-magic', async (req, res) => {
             <p style="font-size:12px;color:#666">This code expires in 15 minutes.</p>
           </div>
         `
+      });
+      const resendError = toErrorMessage(resendResponse?.error, '');
+      const resendId = String(resendResponse?.data?.id || '').trim();
+      if (resendError || !resendId) {
+        const reason = resendError || 'Email provider returned an empty delivery response.';
+        console.error('[EMAIL] request-magic send failed', {
+          projectId: normalizedProjectId,
+          slug: normalizedSlug,
+          from: RESEND_FROM,
+          to: normalizedEmail,
+          reason
+        });
+        await query('DELETE FROM magic_links WHERE id = $1', [verificationId]);
+        return res.status(502).json({ message: `Email failed: ${reason}` });
+      }
+      console.log('[EMAIL] request-magic send success', {
+        projectId: normalizedProjectId,
+        slug: normalizedSlug,
+        from: RESEND_FROM,
+        to: normalizedEmail,
+        resendId
       });
     } else {
       if (process.env.NODE_ENV === 'production') {
@@ -1381,6 +1438,22 @@ app.post('/api/auth/request-magic', async (req, res) => {
 
     return res.json(payload);
   } catch (err) {
+    if (deliveryAttempted) {
+      const reason = toErrorMessage(err, 'Unknown email provider error.');
+      console.error('[EMAIL] request-magic send exception', {
+        projectId: normalizedProjectId,
+        slug: normalizedSlug,
+        from: RESEND_FROM || null,
+        to: normalizedEmail,
+        reason
+      });
+      try {
+        await query('DELETE FROM magic_links WHERE id = $1', [verificationId]);
+      } catch {
+        // best-effort cleanup for unsent codes
+      }
+      return res.status(502).json({ message: `Email failed: ${reason}` });
+    }
     console.error('Magic link request failed:', err);
     return res.status(500).json({ message: 'Unable to send magic link.' });
   }

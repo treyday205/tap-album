@@ -197,6 +197,13 @@ const PublicTAPPage: React.FC = () => {
     });
   };
 
+  const formatEmailSendError = (value: unknown) => {
+    const message = String((value as any)?.message || value || '').trim();
+    if (!message) return 'Email failed. Please try again.';
+    if (/^email failed:/i.test(message)) return message;
+    return `Email failed: ${message}`;
+  };
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const updateOfflineState = () => setIsOffline(!navigator.onLine);
@@ -690,6 +697,15 @@ const PublicTAPPage: React.FC = () => {
         clearAuthPayload(project.projectId);
         lastSupabaseAccessTokenRef.current = null;
       }
+      if (IS_DEV) {
+        console.log('[DEBUG] request-magic start', {
+          apiBaseUrl: API_BASE_URL,
+          projectId: project.projectId,
+          slug: slugValue,
+          email: normalizedEmail,
+          via: isSupabaseAuthEnabled && supabaseAuthClient ? 'supabase' : 'backend'
+        });
+      }
       if (isSupabaseAuthEnabled && supabaseAuthClient) {
         const redirectTo = buildSupabaseEmailRedirectUrl(slugValue, project.projectId);
         const { error: otpError } = await supabaseAuthClient.auth.signInWithOtp({
@@ -709,11 +725,23 @@ const PublicTAPPage: React.FC = () => {
       }
 
       const response = await Api.requestMagicLink(normalizedEmail, project.projectId, slugValue);
+      if (IS_DEV) {
+        console.log('[DEBUG] request-magic success', {
+          verificationId: response?.verificationId || null
+        });
+      }
       setVerificationId(response.verificationId);
       setDevCode(response.devCode || null);
       setStep('code');
     } catch (err: any) {
-      setError(err.message || 'Could not send magic link.');
+      if (IS_DEV) {
+        console.warn('[DEBUG] request-magic failed', {
+          message: String(err?.message || err || ''),
+          status: (err as any)?.status,
+          body: (err as any)?.body || null
+        });
+      }
+      setError(formatEmailSendError(err));
     } finally {
       setIsSending(false);
     }
