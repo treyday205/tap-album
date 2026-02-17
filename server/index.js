@@ -1038,6 +1038,9 @@ const sanitizePwaPath = (value) => {
   const raw = String(value || '').trim();
   if (!raw) return '/';
   if (!raw.startsWith('/')) return '/';
+  const lowered = raw.toLowerCase();
+  if (lowered === '/admin' || lowered.startsWith('/admin/')) return '/';
+  if (lowered === '/dashboard' || lowered.startsWith('/dashboard/')) return '/';
   if (raw.startsWith('/api/')) return '/';
   if (raw.includes('..')) return '/';
   return raw;
@@ -2667,7 +2670,10 @@ app.get('/api/pwa/manifest', async (req, res) => {
   let appName = PWA_APP_NAME;
   let appShortName = 'TAP';
   let appDescription = 'Live album experience';
-  let startPath = requestedPath !== '/' ? requestedPath : '/';
+  const installStartPath = '/';
+  if (IS_DEV && requestedPath !== '/') {
+    console.log('[DEV] ignoring dynamic PWA start path override', { requestedPath });
+  }
 
   if (slug) {
     try {
@@ -2689,9 +2695,6 @@ app.get('/api/pwa/manifest', async (req, res) => {
             ? `Listen to ${title} by ${artistName}`
             : `Listen to ${title}`;
         }
-        if (requestedPath === '/' && row.slug) {
-          startPath = `/${String(row.slug).trim()}`;
-        }
       }
     } catch (err) {
       console.error('PWA manifest project lookup failed:', err?.message || err);
@@ -2699,11 +2702,11 @@ app.get('/api/pwa/manifest', async (req, res) => {
   }
 
   const manifest = {
-    id: startPath,
+    id: installStartPath,
     name: appName,
     short_name: appShortName,
     description: appDescription,
-    start_url: startPath,
+    start_url: installStartPath,
     scope: '/',
     display: 'standalone',
     display_override: ['fullscreen', 'standalone', 'minimal-ui'],

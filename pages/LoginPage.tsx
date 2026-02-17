@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Lock, ArrowRight, ShieldCheck, Radio } from 'lucide-react';
 import { Api } from '../services/api';
@@ -10,6 +10,32 @@ const LoginPage: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    let robotsMeta = document.querySelector('meta[name="robots"]') as HTMLMetaElement | null;
+    const created = !robotsMeta;
+    const previousContent = robotsMeta?.getAttribute('content');
+    if (!robotsMeta) {
+      robotsMeta = document.createElement('meta');
+      robotsMeta.setAttribute('name', 'robots');
+      document.head.appendChild(robotsMeta);
+    }
+    robotsMeta.setAttribute('content', 'noindex,nofollow,noarchive');
+
+    return () => {
+      if (!robotsMeta) return;
+      if (created) {
+        robotsMeta.remove();
+        return;
+      }
+      if (previousContent === null) {
+        robotsMeta.removeAttribute('content');
+      } else {
+        robotsMeta.setAttribute('content', previousContent);
+      }
+    };
+  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();

@@ -1,6 +1,5 @@
 
 import React from 'react';
-import { Link } from 'react-router-dom';
 import { Radio, Zap, Smartphone, Globe, ArrowRight, ShieldCheck, Music4, Share2 } from 'lucide-react';
 
 const LandingPage: React.FC = () => {
@@ -15,9 +14,9 @@ const LandingPage: React.FC = () => {
             </div>
             <span className="text-xl font-black tracking-tighter">TAP ALBUM</span>
           </div>
-          <Link to="/admin" className="text-sm font-bold bg-white text-black px-6 py-2.5 rounded-full hover:bg-slate-200 transition-all">
-            Artist Login
-          </Link>
+          <span className="text-[10px] font-black uppercase tracking-[0.25em] text-slate-500">
+            Public Experience
+          </span>
         </div>
       </nav>
 
@@ -36,10 +35,10 @@ const LandingPage: React.FC = () => {
             Turn your digital albums into premium NFC-powered experiences. Fans simply TAP their phone to your merch to instantly stream, buy tickets, and connect.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4 animate-in fade-in slide-in-from-bottom-16 duration-700 delay-300">
-            <Link to="/admin" className="w-full sm:w-auto bg-green-500 hover:bg-green-400 text-black font-black py-5 px-10 rounded-2xl flex items-center justify-center gap-3 transition-all transform hover:scale-105 active:scale-95 shadow-2xl shadow-green-500/20 text-lg uppercase tracking-widest">
-              Start Building
+            <a href="#demo" className="w-full sm:w-auto bg-green-500 hover:bg-green-400 text-black font-black py-5 px-10 rounded-2xl flex items-center justify-center gap-3 transition-all transform hover:scale-105 active:scale-95 shadow-2xl shadow-green-500/20 text-lg uppercase tracking-widest">
+              Explore TAP
               <ArrowRight size={20} />
-            </Link>
+            </a>
             <a href="#demo" className="w-full sm:w-auto bg-slate-900 hover:bg-slate-800 text-white font-bold py-5 px-10 rounded-2xl transition-all border border-slate-800 text-lg">
               Watch Demo
             </a>

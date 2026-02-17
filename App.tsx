@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-route
 import { StorageService } from './services/storage';
 import { API_BASE_URL } from './services/api';
 
+const LandingPage = lazy(() => import('./pages/LandingPage'));
 const DashboardPage = lazy(() => import('./pages/DashboardPage'));
 const EditorPage = lazy(() => import('./pages/EditorPage'));
 const PublicTAPPage = lazy(() => import('./pages/PublicTAPPage'));
@@ -53,17 +54,28 @@ const ProtectedRoute = ({ children }: { children?: React.ReactNode }) => {
   return <>{children}</>;
 };
 
-const HomeRoute = () => {
-  const isAdmin = isAdminSession();
-  if (isAdmin) {
-    return <Navigate to="/dashboard" replace />;
-  }
+const PublicHomeRoute = () => {
   if (isStandaloneDisplay()) {
     const lastSlug = getLastPublicSlug();
     if (lastSlug) {
       return <Navigate to={`/${encodeURIComponent(lastSlug)}`} replace />;
     }
   }
+  return <LandingPage />;
+};
+
+const AdminEntryRoute = () => {
+  const isAdmin = isAdminSession();
+  const location = useLocation();
+
+  if (isAdmin) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
+  if (isStandaloneDisplay() && location.pathname.startsWith('/admin')) {
+    return <Navigate to="/" replace />;
+  }
+
   return <LoginPage />;
 };
 
@@ -95,17 +107,17 @@ const App: React.FC = () => {
       <div className="min-h-screen bg-slate-950 text-slate-50 selection:bg-green-500/30">
         <Suspense fallback={<RouteFallback />}>
           <Routes>
-            {/* Admin Entry Point (Root) */}
-            <Route path="/" element={<HomeRoute />} />
-            
+            {/* Public Entry Point (Root) */}
+            <Route path="/" element={<PublicHomeRoute />} />
+             
             {/* Public Album Routes */}
             <Route path="/:slug" element={<PublicTAPRoute />} />
             <Route path="/:slug/wallet" element={<WalletPage />} />
             <Route path="/t/:slug" element={<PublicTAPRoute />} />
             <Route path="/t/:slug/wallet" element={<WalletPage />} />
 
-            {/* Legacy Admin Path Redirect */}
-            <Route path="/admin" element={<Navigate to="/" replace />} />
+            {/* Admin Entry Path */}
+            <Route path="/admin/*" element={<AdminEntryRoute />} />
 
             {/* Administrator Only Routes */}
             <Route 

@@ -221,7 +221,7 @@ const DashboardPage: React.FC = () => {
   const handleLogout = () => {
     localStorage.removeItem('tap_is_admin');
     localStorage.removeItem('tap_admin_token');
-    navigate('/admin');
+    navigate('/');
   };
 
   const upsertProject = (nextProject: Project) => {
