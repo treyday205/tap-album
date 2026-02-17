@@ -6,16 +6,10 @@ const normalizeUrl = (value: unknown): string => {
   return raw.replace(/\/+$/g, '');
 };
 
-const readClientEnvValue = (key: string): string => {
-  const importMetaValue = (import.meta as any)?.env?.[key];
-  if (importMetaValue) return String(importMetaValue).trim();
-  return '';
-};
-
-const firstClientEnv = (keys: string[]): string => {
-  for (const key of keys) {
-    const value = readClientEnvValue(key);
-    if (value) return value;
+const firstNonEmpty = (...values: unknown[]): string => {
+  for (const value of values) {
+    const normalized = String(value || '').trim();
+    if (normalized) return normalized;
   }
   return '';
 };
@@ -28,19 +22,21 @@ const parseOptionalBoolean = (value: string): boolean | null => {
   return null;
 };
 
-export const SUPABASE_URL = normalizeUrl(readClientEnvValue('VITE_SUPABASE_URL'));
-
-export const SUPABASE_ANON_KEY = firstClientEnv([
-  'VITE_SUPABASE_ANON_KEY',
-  'VITE_SUPABASE_PUBLISHABLE_KEY'
-]);
-
-export const SUPABASE_STORAGE_BUCKET =
-  firstClientEnv(['VITE_SUPABASE_STORAGE_BUCKET']) || 'tap-album';
-
-export const SUPABASE_BUCKET_PUBLIC = parseOptionalBoolean(
-  readClientEnvValue('VITE_SUPABASE_BUCKET_PUBLIC')
+const clientSupabaseUrl = String(import.meta.env.VITE_SUPABASE_URL || '').trim();
+const clientSupabaseAnonKey = firstNonEmpty(
+  import.meta.env.VITE_SUPABASE_ANON_KEY,
+  import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY
 );
+const clientSupabaseStorageBucket = String(import.meta.env.VITE_SUPABASE_STORAGE_BUCKET || '').trim();
+const clientSupabaseBucketPublic = String(import.meta.env.VITE_SUPABASE_BUCKET_PUBLIC || '').trim();
+
+export const SUPABASE_URL = normalizeUrl(clientSupabaseUrl);
+
+export const SUPABASE_ANON_KEY = clientSupabaseAnonKey;
+
+export const SUPABASE_STORAGE_BUCKET = clientSupabaseStorageBucket || 'tap-album';
+
+export const SUPABASE_BUCKET_PUBLIC = parseOptionalBoolean(clientSupabaseBucketPublic);
 
 export const isSupabaseStorageConfigured = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
 export const isSupabaseAuthEnabled = isSupabaseStorageConfigured;
