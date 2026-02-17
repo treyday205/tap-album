@@ -35,19 +35,16 @@ const LandingPage: React.FC = () => {
             Turn your digital albums into premium NFC-powered experiences. Fans simply TAP their phone to your merch to instantly stream, buy tickets, and connect.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4 animate-in fade-in slide-in-from-bottom-16 duration-700 delay-300">
-            <a href="#demo" className="w-full sm:w-auto bg-green-500 hover:bg-green-400 text-black font-black py-5 px-10 rounded-2xl flex items-center justify-center gap-3 transition-all transform hover:scale-105 active:scale-95 shadow-2xl shadow-green-500/20 text-lg uppercase tracking-widest">
+            <a href="#features" className="w-full sm:w-auto bg-green-500 hover:bg-green-400 text-black font-black py-5 px-10 rounded-2xl flex items-center justify-center gap-3 transition-all transform hover:scale-105 active:scale-95 shadow-2xl shadow-green-500/20 text-lg uppercase tracking-widest">
               Explore TAP
               <ArrowRight size={20} />
-            </a>
-            <a href="#demo" className="w-full sm:w-auto bg-slate-900 hover:bg-slate-800 text-white font-bold py-5 px-10 rounded-2xl transition-all border border-slate-800 text-lg">
-              Watch Demo
             </a>
           </div>
         </div>
       </section>
 
       {/* Feature Grid */}
-      <section className="py-32 px-6 bg-slate-900/20">
+      <section id="features" className="py-32 px-6 bg-slate-900/20">
         <div className="max-w-7xl mx-auto">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
             <div className="bg-slate-900/40 p-10 rounded-[40px] border border-white/5 hover:border-green-500/30 transition-all group">
