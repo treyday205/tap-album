@@ -37,6 +37,7 @@ type BeforeInstallPromptEvent = Event & {
 const PublicTAPPage: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
   const location = useLocation();
+  const PWA_MANIFEST_VERSION = String(import.meta.env?.VITE_PWA_MANIFEST_VERSION || '2026.02.17.2').trim() || '2026.02.17.2';
   const PWA_ENV_VALUE = String(import.meta.env?.VITE_PWA_ENABLED || '').toLowerCase();
   const PWA_ENV_ENABLED = PWA_ENV_VALUE === 'true';
   const PWA_ENV_DISABLED = PWA_ENV_VALUE === 'false';
@@ -58,9 +59,14 @@ const PublicTAPPage: React.FC = () => {
     [location.pathname]
   );
   const publicSlugPaths = useMemo(() => (slug ? [`/${slug}`, `/t/${slug}`] : []), [slug]);
+  const isTapAlbumSlug = useMemo(() => /^tap-[a-z0-9_-]+$/i.test(String(slug || '')), [slug]);
   const isPublicGoLiveRoute = useMemo(
     () => publicSlugPaths.includes(normalizedPath),
     [publicSlugPaths, normalizedPath]
+  );
+  const isPwaInstallRoute = useMemo(
+    () => Boolean(slug) && isTapAlbumSlug && normalizedPath === `/${slug}`,
+    [slug, isTapAlbumSlug, normalizedPath]
   );
 
   const [project, setProject] = useState<Project | null>(null);
@@ -241,7 +247,12 @@ const PublicTAPPage: React.FC = () => {
   }, [slug]);
 
   useEffect(() => {
-    if (!PWA_ENABLED || !isPublicGoLiveRoute || typeof window === 'undefined') return;
+    if (typeof window === 'undefined') return;
+    if (!PWA_ENABLED || !isPwaInstallRoute) {
+      setInstallPromptEvent(null);
+      setShowIosInstall(false);
+      return;
+    }
     const canRegisterSw =
       import.meta.env.PROD ||
       String(import.meta.env?.VITE_PWA_DEV || '').toLowerCase() === 'true';
@@ -276,7 +287,7 @@ const PublicTAPPage: React.FC = () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
       window.removeEventListener('appinstalled', handleInstalled);
     };
-  }, [PWA_ENABLED, isPublicGoLiveRoute]);
+  }, [PWA_ENABLED, isPwaInstallRoute]);
 
     useEffect(() => {
     if (!slug) return;
@@ -365,13 +376,14 @@ const PublicTAPPage: React.FC = () => {
   }, [slug]);
 
   useEffect(() => {
-    if (!PWA_ENABLED || !isPublicGoLiveRoute || !project?.slug || !slug || typeof window === 'undefined') return;
+    if (!PWA_ENABLED || !isPwaInstallRoute || !project?.slug || !slug || typeof window === 'undefined') return;
 
-    // Canonical PWA launch path is always /t/:slug to keep the app scoped to Go Live routes.
-    const albumPath = `/t/${project.slug}`;
+    // Canonical PWA launch path must stay on the exact /tap-:slug album route.
+    const albumPath = `/${slug}`;
     const manifestUrl = new URL('/api/pwa/manifest', window.location.origin);
-    manifestUrl.searchParams.set('slug', project.slug);
+    manifestUrl.searchParams.set('slug', slug);
     manifestUrl.searchParams.set('path', albumPath);
+    manifestUrl.searchParams.set('v', PWA_MANIFEST_VERSION);
     const dynamicHref = `${manifestUrl.pathname}${manifestUrl.search}`;
 
     let manifestLink = document.querySelector('link[rel="manifest"]') as HTMLLinkElement | null;
@@ -413,7 +425,7 @@ const PublicTAPPage: React.FC = () => {
         appleTitleMeta.setAttribute('content', previousAppleTitle);
       }
     };
-  }, [PWA_ENABLED, isPublicGoLiveRoute, project?.slug, project?.title, slug]);
+  }, [PWA_ENABLED, isPwaInstallRoute, project?.slug, project?.title, slug, PWA_MANIFEST_VERSION]);
 
   useEffect(() => {
     const search = location.search || '';
@@ -1078,12 +1090,12 @@ const PublicTAPPage: React.FC = () => {
   };
 
   const showInstallButton = useMemo(
-    () => PWA_ENABLED && isPublicGoLiveRoute && Boolean(installPromptEvent) && !isStandalone,
-    [PWA_ENABLED, isPublicGoLiveRoute, installPromptEvent, isStandalone]
+    () => PWA_ENABLED && isPwaInstallRoute && Boolean(installPromptEvent) && !isStandalone,
+    [PWA_ENABLED, isPwaInstallRoute, installPromptEvent, isStandalone]
   );
   const showIosInstructions = useMemo(
-    () => PWA_ENABLED && isPublicGoLiveRoute && showIosInstall && !isStandalone,
-    [PWA_ENABLED, isPublicGoLiveRoute, showIosInstall, isStandalone]
+    () => PWA_ENABLED && isPwaInstallRoute && showIosInstall && !isStandalone,
+    [PWA_ENABLED, isPwaInstallRoute, showIosInstall, isStandalone]
   );
   const showInstallCard = useMemo(
     () => showIosInstructions,
@@ -1344,7 +1356,7 @@ const PublicTAPPage: React.FC = () => {
             <div className="rounded-2xl border border-green-500/30 bg-slate-900/70 px-4 py-3 text-left">
               {showIosInstructions && (
                 <p className="mt-3 text-[10px] font-black uppercase tracking-[0.22em] text-slate-300">
-                  iPhone: Share → Add to Home Screen
+                  Add to Home Screen from this album page.
                 </p>
               )}
             </div>

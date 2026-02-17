@@ -99,6 +99,7 @@ const MAX_PINS_PER_EMAIL = 1_000_000;
 const MAX_PIN_UNLOCKS_PER_PROJECT = 1_000_000;
 const MAX_ACTIVE_PINS_PER_PROJECT = 1_000_000;
 const PWA_APP_NAME = 'TAP Album';
+const PWA_MANIFEST_VERSION = String(process.env.PWA_MANIFEST_VERSION || '2026.02.17.2').trim() || '2026.02.17.2';
 const IS_DEV = process.env.NODE_ENV !== 'production';
 const MAX_AUDIO_BYTES = 1024 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -1039,9 +1040,17 @@ const normalizeSlugToken = (value) =>
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9_-]/g, '');
+const isTapAlbumSlug = (value) => /^tap-[a-z0-9_-]+$/i.test(String(value || '').trim());
+const normalizeManifestVersion = (value) => {
+  const sanitized = String(value || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]/g, '');
+  if (!sanitized) return '';
+  return sanitized.slice(0, 48);
+};
 const sanitizePwaPath = (value, fallbackSlug = '') => {
   const normalizedSlug = normalizeSlugToken(fallbackSlug);
-  const fallbackPath = normalizedSlug ? `/t/${normalizedSlug}` : '/';
+  const fallbackPath = isTapAlbumSlug(normalizedSlug) ? `/${normalizedSlug}` : '/';
   const raw = String(value || '').trim();
   if (!raw) return fallbackPath;
   if (!raw.startsWith('/')) return fallbackPath;
@@ -1062,21 +1071,19 @@ const sanitizePwaPath = (value, fallbackSlug = '') => {
     return fallbackPath;
   }
 
-  const tapPathMatch = raw.match(/^\/t\/([^/?#]+)\/?$/i);
-  if (tapPathMatch) {
-    const tapSlug = normalizeSlugToken(tapPathMatch[1]);
-    if (tapSlug) {
-      return `/t/${tapSlug}`;
+  const directTapPathMatch = raw.match(/^\/(tap-[^/?#]+)\/?$/i);
+  if (directTapPathMatch) {
+    const directTapSlug = normalizeSlugToken(directTapPathMatch[1]);
+    if (isTapAlbumSlug(directTapSlug)) {
+      return `/${directTapSlug}`;
     }
   }
 
-  if (normalizedSlug) {
-    const directPathMatch = raw.match(/^\/([^/?#]+)\/?$/i);
-    if (directPathMatch) {
-      const directSlug = normalizeSlugToken(directPathMatch[1]);
-      if (directSlug === normalizedSlug) {
-        return `/t/${normalizedSlug}`;
-      }
+  const legacyTapPathMatch = raw.match(/^\/t\/([^/?#]+)\/?$/i);
+  if (legacyTapPathMatch) {
+    const legacyTapSlug = normalizeSlugToken(legacyTapPathMatch[1]);
+    if (isTapAlbumSlug(legacyTapSlug)) {
+      return `/${legacyTapSlug}`;
     }
   }
 
@@ -2703,16 +2710,19 @@ app.get('/api/projects/:slug', async (req, res) => {
 app.get('/api/pwa/manifest', async (req, res) => {
   const requestedSlug = normalizeSlugToken(req.query.slug);
   const requestedPath = sanitizePwaPath(req.query.path, requestedSlug);
-  const inferredPathSlug = requestedPath.startsWith('/t/') ? normalizeSlugToken(requestedPath.slice(3)) : '';
+  const inferredPathSlug = requestedPath.startsWith('/tap-') ? normalizeSlugToken(requestedPath.slice(1)) : '';
   const slug = requestedSlug || inferredPathSlug;
+  const requestVersion = normalizeManifestVersion(req.query.v);
+  const manifestVersion = requestVersion || normalizeManifestVersion(PWA_MANIFEST_VERSION) || '2026.02.17.2';
+  const iconVersionSuffix = encodeURIComponent(manifestVersion);
 
   let appName = PWA_APP_NAME;
   let appShortName = 'TAP';
   let appDescription = 'Live album experience';
   const installStartPath = requestedPath;
-  const installScope = installStartPath.startsWith('/t/') ? '/t/' : '/';
+  const installScope = '/';
   if (IS_DEV && requestedPath !== '/') {
-    console.log('[DEV] using dynamic PWA start path', { requestedPath });
+    console.log('[DEV] using dynamic PWA start path', { requestedPath, manifestVersion });
   }
 
   if (slug) {
@@ -2745,6 +2755,7 @@ app.get('/api/pwa/manifest', async (req, res) => {
     id: installStartPath,
     name: appName,
     short_name: appShortName,
+    version: manifestVersion,
     description: appDescription,
     start_url: installStartPath,
     scope: installScope,
@@ -2756,19 +2767,19 @@ app.get('/api/pwa/manifest', async (req, res) => {
     categories: ['music', 'entertainment'],
     icons: [
       {
-        src: '/icons/icon-192.png',
+        src: `/icons/icon-192.png?v=${iconVersionSuffix}`,
         sizes: '192x192',
         type: 'image/png',
         purpose: 'any'
       },
       {
-        src: '/icons/icon-512.png',
+        src: `/icons/icon-512.png?v=${iconVersionSuffix}`,
         sizes: '512x512',
         type: 'image/png',
         purpose: 'any'
       },
       {
-        src: '/icons/icon-maskable-512.png',
+        src: `/icons/icon-maskable-512.png?v=${iconVersionSuffix}`,
         sizes: '512x512',
         type: 'image/png',
         purpose: 'maskable'

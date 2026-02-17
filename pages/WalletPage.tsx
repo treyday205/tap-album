@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { StorageService } from '../services/storage';
 import { Project, EventType } from '../types';
 import { Api } from '../services/api';
@@ -17,6 +17,10 @@ import ResponsiveImage from '../components/ResponsiveImage';
 const WalletPage: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
+  const normalizedPath = location.pathname.replace(/\/+$/, '');
+  const isTapAlbumSlug = /^tap-[a-z0-9_-]+$/i.test(String(slug || ''));
+  const isPwaInstallRoute = Boolean(slug) && isTapAlbumSlug && normalizedPath === `/${slug}`;
   
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
@@ -51,7 +55,13 @@ const WalletPage: React.FC = () => {
       setLoading(false);
     }
 
-    // PWA Install Prompt Listener
+    if (!isPwaInstallRoute) {
+      setDeferredPrompt(null);
+      setShowInstallBtn(false);
+      return;
+    }
+
+    // PWA install prompt should only be handled on the direct /tap-:slug album route.
     const handleBeforeInstallPrompt = (e: Event) => {
       e.preventDefault();
       setDeferredPrompt(e);
@@ -60,7 +70,7 @@ const WalletPage: React.FC = () => {
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
     return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-  }, [slug, navigate]);
+  }, [slug, navigate, isPwaInstallRoute]);
 
   useEffect(() => {
     const signCover = async () => {
