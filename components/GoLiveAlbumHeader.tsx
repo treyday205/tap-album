@@ -17,7 +17,7 @@ const GoLiveAlbumHeader: React.FC<GoLiveAlbumHeaderProps> = ({
   onInstallClick
 }) => {
   const installButtonClass =
-    'h-9 px-3 rounded-full font-black text-[9px] uppercase tracking-[0.24em] flex items-center justify-center gap-2 transition-all bg-green-500 text-black shadow-xl shadow-green-500/20 active:scale-95 touch-manipulation';
+    'h-8 w-[132px] rounded-xl font-black text-[8px] uppercase tracking-[0.24em] flex items-center justify-center gap-1.5 transition-all bg-green-500 text-black shadow-xl shadow-green-500/20 active:scale-95 touch-manipulation ml-auto';
 
   return (
     <div className="sticky top-0 z-20 px-4 tap-safe-top pb-3 bg-gradient-to-b from-slate-950/95 via-slate-950/90 to-slate-950/70 backdrop-blur-xl border-b border-white/5">
@@ -25,7 +25,7 @@ const GoLiveAlbumHeader: React.FC<GoLiveAlbumHeaderProps> = ({
         <p className="text-[10px] uppercase tracking-[0.35em] font-black text-slate-400/80 text-left">Now Streaming</p>
         {showInstallButton && onInstallClick && (
           <button type="button" onClick={onInstallClick} className={installButtonClass}>
-            <Download size={14} />
+            <Download size={12} />
             Install Album
           </button>
         )}

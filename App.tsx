@@ -1,18 +1,30 @@
 import React, { useEffect, Suspense, lazy, useState } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { StorageService } from './services/storage';
 import { API_BASE_URL } from './services/api';
 
+const LandingPage = lazy(() => import('./pages/LandingPage'));
 const DashboardPage = lazy(() => import('./pages/DashboardPage'));
 const EditorPage = lazy(() => import('./pages/EditorPage'));
 const PublicTAPPage = lazy(() => import('./pages/PublicTAPPage'));
 const PublicTAPPagePerf = lazy(() => import('./pages/PublicTAPPagePerf'));
 const LoginPage = lazy(() => import('./pages/LoginPage'));
 const WalletPage = lazy(() => import('./pages/WalletPage'));
+const ADMIN_ENTRY_PATH = '/control-admin';
+const ADMIN_DASHBOARD_PATH = '/control-admin/dashboard';
+const ADMIN_EDITOR_BASE_PATH = '/control-admin/dashboard/edit';
 
 const isAdminSession = () =>
   Boolean(localStorage.getItem('tap_admin_token')) ||
   localStorage.getItem('tap_is_admin') === 'true';
+
+const isStandalonePwa = () => {
+  if (typeof window === 'undefined') return false;
+  return (
+    window.matchMedia('(display-mode: standalone)').matches ||
+    (window.navigator as any)?.standalone === true
+  );
+};
 
 const resolvePublicPerfFlag = () => {
   const envValue = String(import.meta.env?.VITE_PUBLIC_PERF_V2 || '').toLowerCase();
@@ -29,24 +41,40 @@ const resolvePublicPerfFlag = () => {
 };
 
 const ProtectedRoute = ({ children }: { children?: React.ReactNode }) => {
+  if (isStandalonePwa()) {
+    return <Navigate to="/" replace />;
+  }
+
   const isAdmin = isAdminSession();
   const location = useLocation();
 
   if (!isAdmin) {
-    return <Navigate to="/" state={{ from: location }} replace />;
+    return <Navigate to={ADMIN_ENTRY_PATH} state={{ from: location }} replace />;
   }
 
   return <>{children}</>;
 };
 
 const AdminEntryRoute = () => {
+  if (isStandalonePwa()) {
+    return <Navigate to="/" replace />;
+  }
+
   const isAdmin = isAdminSession();
 
   if (isAdmin) {
-    return <Navigate to="/dashboard" replace />;
+    return <Navigate to={ADMIN_DASHBOARD_PATH} replace />;
   }
 
   return <LoginPage />;
+};
+
+const LegacyDashboardEditRoute = () => {
+  const { projectId } = useParams<{ projectId: string }>();
+  if (!projectId) {
+    return <Navigate to={ADMIN_DASHBOARD_PATH} replace />;
+  }
+  return <Navigate to={`${ADMIN_EDITOR_BASE_PATH}/${projectId}`} replace />;
 };
 
 const PublicTAPRoute = () => {
@@ -77,9 +105,15 @@ const App: React.FC = () => {
       <div className="min-h-screen bg-slate-950 text-slate-50 selection:bg-green-500/30">
         <Suspense fallback={<RouteFallback />}>
           <Routes>
-            {/* Admin Entry Point (Root) */}
-            <Route path="/" element={<AdminEntryRoute />} />
-            <Route path="/admin/*" element={<AdminEntryRoute />} />
+            {/* Public Marketing Entry (Root) */}
+            <Route path="/" element={<LandingPage />} />
+            <Route path="/features" element={<LandingPage />} />
+
+            {/* Non-Public Admin Entry */}
+            <Route path={ADMIN_ENTRY_PATH} element={<AdminEntryRoute />} />
+            <Route path="/admin/*" element={<Navigate to="/" replace />} />
+            <Route path="/dashboard" element={<Navigate to={ADMIN_DASHBOARD_PATH} replace />} />
+            <Route path="/dashboard/edit/:projectId" element={<LegacyDashboardEditRoute />} />
              
             {/* Public Album Routes */}
             <Route path="/:slug" element={<PublicTAPRoute />} />
@@ -89,7 +123,7 @@ const App: React.FC = () => {
 
             {/* Administrator Only Routes */}
             <Route 
-              path="/dashboard" 
+              path={ADMIN_DASHBOARD_PATH} 
               element={
                 <ProtectedRoute>
                   <DashboardPage />
@@ -97,7 +131,7 @@ const App: React.FC = () => {
               } 
             />
             <Route 
-              path="/dashboard/edit/:projectId" 
+              path={`${ADMIN_EDITOR_BASE_PATH}/:projectId`} 
               element={
                 <ProtectedRoute>
                   <EditorPage />

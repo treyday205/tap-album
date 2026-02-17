@@ -221,7 +221,7 @@ const DashboardPage: React.FC = () => {
   const handleLogout = () => {
     localStorage.removeItem('tap_is_admin');
     localStorage.removeItem('tap_admin_token');
-    navigate('/');
+    navigate('/control-admin');
   };
 
   const upsertProject = (nextProject: Project) => {
@@ -266,7 +266,7 @@ const DashboardPage: React.FC = () => {
         setAssetUrls((prev) => ({ ...prev, [coverRef]: coverSignedUrl }));
       }
 
-      navigate(`/dashboard/edit/${createdProject.projectId}`);
+      navigate(`/control-admin/dashboard/edit/${createdProject.projectId}`);
     } catch (err: any) {
       alert(err?.message || 'Unable to create album right now.');
     } finally {

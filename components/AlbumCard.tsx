@@ -122,7 +122,7 @@ const AlbumCard: React.FC<AlbumCardProps> = ({
 
         <div className="grid grid-cols-2 gap-3">
           <Link
-            to={`/dashboard/edit/${project.projectId}`}
+            to={`/control-admin/dashboard/edit/${project.projectId}`}
             className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold py-2.5 rounded-xl transition-colors"
           >
             <Settings size={14} />

@@ -1034,20 +1034,53 @@ const generateProjectSlug = () => {
   }
   return slug;
 };
-const sanitizePwaPath = (value) => {
+const normalizeSlugToken = (value) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '');
+const sanitizePwaPath = (value, fallbackSlug = '') => {
+  const normalizedSlug = normalizeSlugToken(fallbackSlug);
+  const fallbackPath = normalizedSlug ? `/t/${normalizedSlug}` : '/';
   const raw = String(value || '').trim();
-  if (!raw) return '/';
-  if (!raw.startsWith('/')) return '/';
+  if (!raw) return fallbackPath;
+  if (!raw.startsWith('/')) return fallbackPath;
+  if (raw.includes('..')) return fallbackPath;
+
   const lowered = raw.toLowerCase();
-  if (lowered === '/admin' || lowered.startsWith('/admin/')) return '/';
-  if (lowered === '/dashboard' || lowered.startsWith('/dashboard/')) return '/';
-  if (raw.startsWith('/api/')) return '/';
-  if (raw.includes('..')) return '/';
-  const isRootPath = raw === '/';
-  const isDirectPublicPath = /^\/[^/?#]+$/.test(raw);
-  const isTapPublicPath = /^\/t\/[^/?#]+$/.test(raw);
-  if (!isRootPath && !isDirectPublicPath && !isTapPublicPath) return '/';
-  return raw;
+  if (
+    lowered === '/admin' ||
+    lowered.startsWith('/admin/') ||
+    lowered === '/dashboard' ||
+    lowered.startsWith('/dashboard/') ||
+    lowered === '/control-admin' ||
+    lowered.startsWith('/control-admin/') ||
+    lowered === '/features' ||
+    lowered.startsWith('/features/') ||
+    lowered.startsWith('/api/')
+  ) {
+    return fallbackPath;
+  }
+
+  const tapPathMatch = raw.match(/^\/t\/([^/?#]+)\/?$/i);
+  if (tapPathMatch) {
+    const tapSlug = normalizeSlugToken(tapPathMatch[1]);
+    if (tapSlug) {
+      return `/t/${tapSlug}`;
+    }
+  }
+
+  if (normalizedSlug) {
+    const directPathMatch = raw.match(/^\/([^/?#]+)\/?$/i);
+    if (directPathMatch) {
+      const directSlug = normalizeSlugToken(directPathMatch[1]);
+      if (directSlug === normalizedSlug) {
+        return `/t/${normalizedSlug}`;
+      }
+    }
+  }
+
+  return fallbackPath;
 };
 const createDefaultProjectPayload = ({ ownerUserId, projectId, slug, title, artistName }) => {
   const now = new Date().toISOString();
@@ -2668,13 +2701,16 @@ app.get('/api/projects/:slug', async (req, res) => {
 });
 
 app.get('/api/pwa/manifest', async (req, res) => {
-  const slug = String(req.query.slug || '').trim().toLowerCase();
-  const requestedPath = sanitizePwaPath(req.query.path);
+  const requestedSlug = normalizeSlugToken(req.query.slug);
+  const requestedPath = sanitizePwaPath(req.query.path, requestedSlug);
+  const inferredPathSlug = requestedPath.startsWith('/t/') ? normalizeSlugToken(requestedPath.slice(3)) : '';
+  const slug = requestedSlug || inferredPathSlug;
 
   let appName = PWA_APP_NAME;
   let appShortName = 'TAP';
   let appDescription = 'Live album experience';
-  const installStartPath = requestedPath !== '/' ? requestedPath : '/';
+  const installStartPath = requestedPath;
+  const installScope = installStartPath.startsWith('/t/') ? '/t/' : '/';
   if (IS_DEV && requestedPath !== '/') {
     console.log('[DEV] using dynamic PWA start path', { requestedPath });
   }
@@ -2711,7 +2747,7 @@ app.get('/api/pwa/manifest', async (req, res) => {
     short_name: appShortName,
     description: appDescription,
     start_url: installStartPath,
-    scope: '/',
+    scope: installScope,
     display: 'standalone',
     display_override: ['fullscreen', 'standalone', 'minimal-ui'],
     background_color: '#020617',

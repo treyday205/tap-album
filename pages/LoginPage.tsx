@@ -48,12 +48,12 @@ const LoginPage: React.FC = () => {
         localStorage.setItem('tap_admin_token', response.token);
       }
       localStorage.setItem('tap_is_admin', 'true');
-      navigate('/dashboard');
+      navigate('/control-admin/dashboard');
       return;
     } catch (err: any) {
       if (import.meta.env.DEV && password === '200038') {
         localStorage.setItem('tap_is_admin', 'true');
-        navigate('/dashboard');
+        navigate('/control-admin/dashboard');
         return;
       }
       const message = err?.message || '';

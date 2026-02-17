@@ -331,38 +331,25 @@ const PublicTAPPage: React.FC = () => {
   }, [slug]);
 
   useEffect(() => {
-    if (!PWA_ENABLED || !isPublicGoLiveRoute || !project?.slug || typeof window === 'undefined') return;
+    if (!PWA_ENABLED || !isPublicGoLiveRoute || !project?.slug || !slug || typeof window === 'undefined') return;
 
-    const isTapRoute = window.location.pathname.startsWith('/t/');
-    const albumPath = isTapRoute ? `/t/${project.slug}` : `/${project.slug}`;
+    // Canonical PWA launch path is always /t/:slug to keep the app scoped to Go Live routes.
+    const albumPath = `/t/${project.slug}`;
     const manifestUrl = new URL('/api/pwa/manifest', window.location.origin);
     manifestUrl.searchParams.set('slug', project.slug);
     manifestUrl.searchParams.set('path', albumPath);
     const dynamicHref = `${manifestUrl.pathname}${manifestUrl.search}`;
-    const fallbackHref = '/manifest.webmanifest';
 
     let manifestLink = document.querySelector('link[rel="manifest"]') as HTMLLinkElement | null;
     const createdManifestLink = !manifestLink;
-    const previousManifestHref = manifestLink?.getAttribute('href') || fallbackHref;
+    const previousManifestHref = manifestLink?.getAttribute('href') || '';
     if (!manifestLink) {
       manifestLink = document.createElement('link');
       manifestLink.setAttribute('rel', 'manifest');
       document.head.appendChild(manifestLink);
     }
-    manifestLink.setAttribute('href', fallbackHref);
-
-    let cancelled = false;
-    fetch(dynamicHref, { method: 'GET', cache: 'no-store' })
-      .then((response) => {
-        if (cancelled) return;
-        const contentType = response.headers.get('content-type') || '';
-        if (response.ok && /application\/(manifest\+json|json)/i.test(contentType)) {
-          manifestLink?.setAttribute('href', dynamicHref);
-        }
-      })
-      .catch(() => {
-        // keep fallback manifest
-      });
+    manifestLink.setAttribute('href', dynamicHref);
+    manifestLink.setAttribute('data-tap-go-live-manifest', 'true');
 
     const themeMeta = document.querySelector('meta[name="theme-color"]');
     const previousTheme = themeMeta?.getAttribute('content') || '';
@@ -377,11 +364,13 @@ const PublicTAPPage: React.FC = () => {
     }
 
     return () => {
-      cancelled = true;
-      if (createdManifestLink) {
-        manifestLink?.remove();
-      } else if (manifestLink) {
-        manifestLink.setAttribute('href', previousManifestHref);
+      if (manifestLink?.getAttribute('data-tap-go-live-manifest') === 'true') {
+        manifestLink.removeAttribute('data-tap-go-live-manifest');
+        if (createdManifestLink) {
+          manifestLink.remove();
+        } else {
+          manifestLink.setAttribute('href', previousManifestHref || 'about:blank');
+        }
       }
       if (themeMeta && previousTheme) {
         themeMeta.setAttribute('content', previousTheme);
@@ -390,7 +379,7 @@ const PublicTAPPage: React.FC = () => {
         appleTitleMeta.setAttribute('content', previousAppleTitle);
       }
     };
-  }, [PWA_ENABLED, isPublicGoLiveRoute, project?.slug, project?.title]);
+  }, [PWA_ENABLED, isPublicGoLiveRoute, project?.slug, project?.title, slug]);
 
   useEffect(() => {
     const search = location.search || '';

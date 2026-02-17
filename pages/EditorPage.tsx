@@ -139,7 +139,7 @@ const EditorPage: React.FC = () => {
         setTracks(StorageService.getTracks(projectId));
         setLinks(StorageService.getLinks(projectId));
       } else {
-        navigate('/dashboard');
+        navigate('/control-admin/dashboard');
       }
       setIsLoadingProject(false);
     }
@@ -348,7 +348,7 @@ const EditorPage: React.FC = () => {
           const message = String(err?.message || '');
           if (message.toLowerCase().includes('project not found')) {
             StorageService.deleteProject(project.projectId);
-            navigate('/dashboard');
+            navigate('/control-admin/dashboard');
             return;
           }
           if (import.meta.env.DEV) {
@@ -869,7 +869,7 @@ const EditorPage: React.FC = () => {
 
       <div className="sticky top-0 z-30 bg-slate-950/80 backdrop-blur-md border-b border-slate-800 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <button onClick={() => navigate('/dashboard')} className="p-2 hover:bg-slate-800 rounded-full transition-colors text-slate-400">
+          <button onClick={() => navigate('/control-admin/dashboard')} className="p-2 hover:bg-slate-800 rounded-full transition-colors text-slate-400">
             <ChevronLeft />
           </button>
           <div>
