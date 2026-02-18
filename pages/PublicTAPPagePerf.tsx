@@ -10,7 +10,6 @@ import { registerSW } from 'virtual:pwa-register';
 import {
   createTrackAudioUrlResolver,
   DEFAULT_TRACK_STORAGE,
-  extractTrackStoragePath,
   normalizeTrackStorageConfig,
   type SignedTrackUrlCache,
   type TrackStorageConfig
@@ -721,12 +720,9 @@ const PublicTAPPage: React.FC = () => {
 
   useEffect(() => {
     if (!project || !isUnlocked) return;
-    const legacyTrackAudioValues = tracks
-      .filter((track) => !extractTrackStoragePath(track))
-      .map((track) => track.mp3Url);
     const values = [
       project.coverImageUrl,
-      ...legacyTrackAudioValues,
+      ...tracks.map((track) => track.mp3Url),
       ...tracks.map((track) => track.artworkUrl)
     ];
     const signedRefs = collectAssetRefs(values);
