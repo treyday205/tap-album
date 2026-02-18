@@ -5,22 +5,20 @@ import { Project, Track, EventType } from '../types';
 import { Api, API_BASE_URL } from '../services/api';
 import { ShieldAlert, Mail, ArrowRight, Loader2, CheckCircle2, XCircle, Key } from 'lucide-react';
 import { collectAssetRefs, resolveAssetUrl, isAssetRef } from '../services/assets';
-import { collectBankRefs, resolveBankUrls, isBankRef } from '../services/assetBank';
+import { collectBankRefs, resolveBankUrls } from '../services/assetBank';
 import { registerSW } from 'virtual:pwa-register';
 import {
+  createTrackAudioUrlResolver,
+  DEFAULT_TRACK_STORAGE,
   extractTrackStoragePath,
-  isSupabaseStorageConfigError,
-  resolveRuntimeTrackAudioUrl,
+  normalizeTrackStorageConfig,
   type SignedTrackUrlCache,
   type TrackStorageConfig
 } from '../services/trackAudio';
 import {
   buildSupabaseEmailRedirectUrl,
   hasSupabaseAuthUrlState,
-  isSupabaseStorageConfigured,
   isSupabaseAuthEnabled,
-  SUPABASE_BUCKET_PUBLIC,
-  SUPABASE_STORAGE_BUCKET,
   supabaseAuthClient
 } from '../services/supabaseAuth';
 
@@ -38,26 +36,6 @@ const scopedAuthEmailKey = (projectId: string) => `${AUTH_EMAIL_KEY}_${projectId
 const normalizeProjectId = (value?: string | null) => String(value || '').trim();
 const PUBLIC_CACHE_PREFIX = 'tap_public_cache_';
 const LAST_PUBLIC_SLUG_KEY = 'tap_last_public_slug';
-const DEFAULT_TRACK_STORAGE: TrackStorageConfig = {
-  bucket: SUPABASE_STORAGE_BUCKET || 'tap-album',
-  isPublic: SUPABASE_BUCKET_PUBLIC === true,
-  signedUrlTtl: 3600
-};
-const normalizeTrackStorageConfig = (value: any): TrackStorageConfig => {
-  const bucket = String(value?.bucket || DEFAULT_TRACK_STORAGE.bucket).trim() || DEFAULT_TRACK_STORAGE.bucket;
-  const ttlValue = Number(value?.signedUrlTtl);
-  const isPublicValue =
-    typeof value?.public === 'boolean'
-      ? value.public
-      : typeof value?.isPublic === 'boolean'
-        ? value.isPublic
-        : DEFAULT_TRACK_STORAGE.isPublic;
-  return {
-    bucket,
-    isPublic: isPublicValue,
-    signedUrlTtl: Number.isFinite(ttlValue) ? Math.max(60, Math.floor(ttlValue)) : DEFAULT_TRACK_STORAGE.signedUrlTtl
-  };
-};
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -645,79 +623,32 @@ const PublicTAPPage: React.FC = () => {
   const resolveAsset = useCallback((value: string) => resolveAssetUrl(value, assetUrls), [assetUrls]);
 
   const resolveTrackAudioForPlayback = useCallback(
-    async (
-      track: Track,
-      options?: { forceRefresh?: boolean; reason?: 'manual' | 'probe' | 'stalled' | 'waiting' | 'error' }
-    ) => {
-      const storagePath = extractTrackStoragePath(track);
-      const trackId = String(track.trackId || '').trim();
-      const cacheKey = trackId || storagePath;
-      const reason = options?.reason || 'manual';
-      const allowRefreshWhilePlaying = reason === 'stalled' || reason === 'waiting' || reason === 'error';
-      const isCurrentTrackPlaying =
-        playerStateRef.current.isPlaying &&
-        Boolean(playerStateRef.current.currentTrackId) &&
-        playerStateRef.current.currentTrackId === trackId;
-      const rawMp3Value = String(track.mp3Url || '').trim();
-
-      if (!storagePath) {
-        let fallback = resolveAsset(rawMp3Value).trim();
-        if (!fallback && isBankRef(rawMp3Value)) {
-          const bankResolved = await resolveBankUrls([rawMp3Value]);
-          const bankUrl = String(bankResolved[rawMp3Value] || '').trim();
-          if (bankUrl) {
-            setAssetUrls((prev) => ({ ...prev, ...bankResolved }));
-            fallback = bankUrl;
-          } else {
-            throw new Error('Track is local-only on this device. Upload to Supabase to publish.');
-          }
+    createTrackAudioUrlResolver({
+      storage: trackStorage,
+      cache: signedTrackAudioUrlsRef.current,
+      resolveAssetUrl: resolveAsset,
+      resolveBankAssetUrls: resolveBankUrls,
+      onBankAssetsResolved: (resolved) => {
+        if (Object.keys(resolved).length > 0) {
+          setAssetUrls((prev) => ({ ...prev, ...resolved }));
         }
-        if (!fallback) {
-          throw new Error('Track audio is missing.');
-        }
-        return fallback;
-      }
-
-      if (!isSupabaseStorageConfigured) {
-        if (IS_DEV) {
-          console.warn('[AUDIO] Supabase client config missing for storage playback.');
-        }
-        throw new Error('Audio playback is temporarily unavailable. Please try again soon.');
-      }
-
-      if (isCurrentTrackPlaying && !allowRefreshWhilePlaying) {
-        const cached = signedTrackAudioUrlsRef.current[cacheKey];
-        if (cached?.url) {
-          return cached.url;
-        }
-        const fallback = resolveAsset(rawMp3Value).trim();
-        if (fallback) {
-          return fallback;
-        }
-      }
-
-      let resolved;
-      try {
-        resolved = await resolveRuntimeTrackAudioUrl({
-          track,
-          storage: trackStorage,
-          cache: signedTrackAudioUrlsRef.current,
-          forceRefresh: Boolean(options?.forceRefresh) && (!isCurrentTrackPlaying || allowRefreshWhilePlaying)
+      },
+      getPlayerState: () => playerStateRef.current,
+      onResolvedUrl: ({ track: resolvedTrack, url, source, reason, storagePath, fromCache }) => {
+        if (!isPublicGoLiveRoute) return;
+        console.log('[AUDIO][GoLive] resolved-track-url', {
+          projectId: project?.projectId || null,
+          trackId: resolvedTrack.trackId,
+          title: resolvedTrack.title,
+          reason,
+          source,
+          storagePath: storagePath || null,
+          fromCache,
+          url
         });
-      } catch (error) {
-        if (isSupabaseStorageConfigError(error)) {
-          throw new Error('Audio playback is temporarily unavailable. Please try again soon.');
-        }
-        throw error;
       }
-      signedTrackAudioUrlsRef.current[cacheKey] = {
-        url: resolved.url,
-        expiresAt: resolved.expiresAt,
-        storagePath: resolved.storagePath || storagePath
-      };
-      return resolved.url;
-    },
-    [resolveAsset, trackStorage]
+    }),
+    [isPublicGoLiveRoute, project?.projectId, resolveAsset, trackStorage]
   );
 
   const registerPreconnect = useCallback((target: string) => {

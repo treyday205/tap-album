@@ -11,6 +11,11 @@ import { Project, Track, ProjectLink, LinkCategory } from '../types';
 import { GoogleGenAI, Type } from "@google/genai";
 import { collectAssetRefs, getAssetKey, isAssetRef, resolveAssetUrl } from '../services/assets';
 import { collectBankRefs, resolveBankUrls, saveBankAsset } from '../services/assetBank';
+import {
+  createTrackAudioUrlResolver,
+  DEFAULT_TRACK_STORAGE,
+  type SignedTrackUrlCache
+} from '../services/trackAudio';
 import ResponsiveImage from '../components/ResponsiveImage';
 
 const TracklistTab = lazy(() => import('../components/editor/EditorTracklistTab'));
@@ -50,6 +55,7 @@ const EditorPage: React.FC = () => {
   const [assetUrls, setAssetUrls] = useState<Record<string, string>>({});
   const signedAssetRequestsRef = useRef(new Set<string>());
   const bankAssetRequestsRef = useRef(new Set<string>());
+  const signedTrackAudioUrlsRef = useRef<SignedTrackUrlCache>({});
   
   const [project, setProject] = useState<Project | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
@@ -223,6 +229,21 @@ const EditorPage: React.FC = () => {
   }, [SECURITY_V2_ENABLED, activeTab, project?.projectId, syncTick]);
 
   const resolveAsset = useCallback((value: string) => resolveAssetUrl(value, assetUrls), [assetUrls]);
+
+  const resolveTrackAudioForPreview = useCallback(
+    createTrackAudioUrlResolver({
+      storage: DEFAULT_TRACK_STORAGE,
+      cache: signedTrackAudioUrlsRef.current,
+      resolveAssetUrl: resolveAsset,
+      resolveBankAssetUrls: resolveBankUrls,
+      onBankAssetsResolved: (resolved) => {
+        if (Object.keys(resolved).length > 0) {
+          setAssetUrls((prev) => ({ ...prev, ...resolved }));
+        }
+      }
+    }),
+    [resolveAsset]
+  );
 
   const ensureSignedAssets = async (refs: string[]) => {
     if (!project) return;
@@ -1070,7 +1091,12 @@ const EditorPage: React.FC = () => {
 
         {showMobilePreview && (
           <Suspense fallback={<DevicePreviewSkeleton />}>
-            <DevicePreview project={project} tracks={tracks} resolveAssetUrl={resolveAsset} />
+            <DevicePreview
+              project={project}
+              tracks={tracks}
+              resolveAssetUrl={resolveAsset}
+              resolveTrackAudioUrl={resolveTrackAudioForPreview}
+            />
           </Suspense>
         )}
       </div>

@@ -1,14 +1,21 @@
 import React, { memo } from 'react';
 import { Project, Track } from '../../types';
+import { type TrackAudioResolveOptions } from '../../services/trackAudio';
 import TAPRenderer from '../TAPRenderer';
 
 type EditorDevicePreviewProps = {
   project: Project;
   tracks: Track[];
   resolveAssetUrl: (value: string) => string;
+  resolveTrackAudioUrl?: (track: Track, options?: TrackAudioResolveOptions) => Promise<string>;
 };
 
-const EditorDevicePreview: React.FC<EditorDevicePreviewProps> = ({ project, tracks, resolveAssetUrl }) => {
+const EditorDevicePreview: React.FC<EditorDevicePreviewProps> = ({
+  project,
+  tracks,
+  resolveAssetUrl,
+  resolveTrackAudioUrl
+}) => {
   return (
     <div className="relative flex flex-col w-full lg:w-[440px] px-4 py-8 lg:p-10 items-center justify-center lg:sticky lg:top-0 lg:h-[calc(100vh-73px)] bg-[radial-gradient(ellipse_at_top,_rgba(34,197,94,0.12),_transparent_55%)] overflow-hidden border-t border-slate-800/60 lg:border-t-0">
       <div className="pointer-events-none absolute -top-10 left-1/2 -translate-x-1/2 w-72 h-72 bg-green-500/10 blur-3xl rounded-full"></div>
@@ -18,7 +25,14 @@ const EditorDevicePreview: React.FC<EditorDevicePreviewProps> = ({ project, trac
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-28 h-5 bg-slate-800/90 rounded-b-2xl z-40"></div>
         <div className="absolute top-6 left-1/2 -translate-x-1/2 w-16 h-1 bg-slate-800/70 rounded-full"></div>
         <div className="flex-1 overflow-hidden">
-          <TAPRenderer project={project} tracks={tracks} isPreview={true} showCover={true} resolveAssetUrl={resolveAssetUrl} />
+          <TAPRenderer
+            project={project}
+            tracks={tracks}
+            isPreview={true}
+            showCover={true}
+            resolveAssetUrl={resolveAssetUrl}
+            resolveTrackAudioUrl={resolveTrackAudioUrl}
+          />
         </div>
       </div>
     </div>
