@@ -81,6 +81,9 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     return resolveAssetUrl ? resolveAssetUrl(value) : value;
   };
 
+  const getTrackAudioValue = (track: Track) =>
+    String(track.audioUrl || track.mp3Url || '').trim();
+
   const isAudioAssetRef = (value: string) => {
     const trimmed = String(value || '').trim().toLowerCase();
     if (!trimmed.startsWith('asset:')) return false;
@@ -133,8 +136,8 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
 
   const canPlayTrack = (track: Track, resolvedUrl: string) => {
     if (isPlayableAudioUrl(resolvedUrl)) return true;
-    if (String(track.storagePath || '').trim()) return true;
-    const raw = String(track.mp3Url || '').trim();
+    if (String(track.audioPath || track.storagePath || '').trim()) return true;
+    const raw = getTrackAudioValue(track);
     const normalizedRaw = raw.toLowerCase();
     if (normalizedRaw.startsWith('bank:')) {
       return false;
@@ -451,7 +454,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     activeTrackRef.current = track;
 
     try {
-      const rawUrl = (track.mp3Url || '').trim();
+      const rawUrl = getTrackAudioValue(track);
       const fallbackUrl = resolveUrl(rawUrl);
       let playableUrl = fallbackUrl;
 
@@ -555,9 +558,9 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   };
 
   const mp3Tracks = tracks.filter((track) => {
-    const rawUrl = (track.mp3Url || '').trim();
+    const rawUrl = getTrackAudioValue(track);
     const resolvedUrl = resolveUrl(rawUrl);
-    const storagePath = String(track.storagePath || '').trim();
+    const storagePath = String(track.audioPath || track.storagePath || '').trim();
     const normalizedRaw = rawUrl.toLowerCase();
     const normalizedResolved = resolvedUrl.toLowerCase();
     return (
@@ -816,7 +819,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
               </div>
             )}
             {displayTracks.map((track, index) => {
-              const audioUrl = resolveUrl(track.mp3Url || '');
+              const audioUrl = resolveUrl(getTrackAudioValue(track));
               return (
                 <TrackRow
                   key={track.trackId}

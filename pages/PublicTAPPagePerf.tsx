@@ -722,6 +722,7 @@ const PublicTAPPage: React.FC = () => {
     if (!project || !isUnlocked) return;
     const values = [
       project.coverImageUrl,
+      ...tracks.map((track) => track.audioUrl),
       ...tracks.map((track) => track.mp3Url),
       ...tracks.map((track) => track.artworkUrl)
     ];

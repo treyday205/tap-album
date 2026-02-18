@@ -165,6 +165,8 @@ CREATE TABLE IF NOT EXISTS tracks (
   title TEXT NOT NULL,
   track_no INTEGER NOT NULL DEFAULT 0,
   storage_path TEXT,
+  audio_path TEXT,
+  audio_url TEXT,
   mp3_url TEXT,
   artwork_url TEXT,
   sort_order INTEGER NOT NULL DEFAULT 0,
@@ -178,6 +180,12 @@ ALTER TABLE tracks
 ALTER TABLE tracks
   ADD COLUMN IF NOT EXISTS storage_path TEXT;
 
+ALTER TABLE tracks
+  ADD COLUMN IF NOT EXISTS audio_path TEXT;
+
+ALTER TABLE tracks
+  ADD COLUMN IF NOT EXISTS audio_url TEXT;
+
 UPDATE tracks
 SET track_no = CASE
   WHEN COALESCE(track_no, 0) > 0 THEN track_no
@@ -189,6 +197,17 @@ UPDATE tracks
 SET storage_path = SUBSTRING(mp3_url FROM 7)
 WHERE (storage_path IS NULL OR BTRIM(storage_path) = '')
   AND mp3_url LIKE 'asset:%';
+
+UPDATE tracks
+SET audio_path = storage_path
+WHERE (audio_path IS NULL OR BTRIM(audio_path) = '')
+  AND storage_path IS NOT NULL
+  AND BTRIM(storage_path) <> '';
+
+UPDATE tracks
+SET audio_url = mp3_url
+WHERE (audio_url IS NULL OR BTRIM(audio_url) = '')
+  AND mp3_url ILIKE 'http%';
 
 CREATE INDEX IF NOT EXISTS idx_projects_slug ON projects (slug);
 CREATE INDEX IF NOT EXISTS idx_tracks_project ON tracks (project_id);

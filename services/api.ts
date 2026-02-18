@@ -285,7 +285,8 @@ export const Api = {
     }
   ): Promise<{ assetRef: string }> =>
     new Promise(async (resolve, reject) => {
-      const contentType = file.type || 'application/octet-stream';
+      const isTrackAudio = options.assetKind === 'track-audio';
+      const contentType = String(file.type || '').trim() || (isTrackAudio ? 'audio/mpeg' : 'application/octet-stream');
 
       const requestPresign = () =>
         request('/api/uploads/presign', {
@@ -305,13 +306,22 @@ export const Api = {
           const uploadUrl = String(presign?.uploadUrl || '');
           const assetRef = String(presign?.assetRef || '');
           const method = String(presign?.method || 'PUT').toUpperCase();
-          const headers = presign?.headers || {};
+          const headers = {
+            ...(presign?.headers || {})
+          } as Record<string, string>;
           const storage = presign?.storage || 'unknown';
           const cacheControl = String(presign?.cacheControl || '3600');
 
           if (!uploadUrl || !assetRef) {
             rejectUpload(new Error('Upload configuration missing.'));
             return;
+          }
+
+          if (storage === 'supabase') {
+            headers['Content-Type'] = contentType;
+            if (cacheControl) {
+              headers['cache-control'] = cacheControl;
+            }
           }
 
           reportUploadTelemetry({
@@ -342,7 +352,6 @@ export const Api = {
 
           Object.entries(headers).forEach(([key, value]) => {
             if (value === undefined || value === null) return;
-            if (storage === 'supabase' && key.toLowerCase() === 'content-type') return;
             xhr.setRequestHeader(key, String(value));
           });
 
@@ -395,14 +404,6 @@ export const Api = {
             rejectUpload(new Error(`Upload failed (status ${xhr.status || 0})`));
           };
 
-          if (storage === 'supabase') {
-            const form = new FormData();
-            form.append('cacheControl', cacheControl);
-            form.append('', file);
-            xhr.send(form);
-            return;
-          }
-
           xhr.send(file);
         });
 
@@ -425,6 +426,22 @@ export const Api = {
       assetKind: 'track-audio',
       trackId,
       onProgress
+    }),
+
+  saveTrackAudioUrl: (
+    projectId: string,
+    trackId: string,
+    payload?: { storagePath?: string },
+    token?: string
+  ) =>
+    request(`/api/projects/${encodeURIComponent(projectId)}/tracks/${encodeURIComponent(trackId)}/audio-url`, {
+      method: 'POST',
+      body: JSON.stringify(payload || {}),
+      headers: token
+        ? {
+            Authorization: `Bearer ${token}`
+          }
+        : undefined
     }),
 
   adminLogin: (password: string) =>

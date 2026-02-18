@@ -125,6 +125,10 @@ const SUPABASE_ANON_KEY =
 const SUPABASE_BUCKET = String(process.env.SUPABASE_BUCKET || 'tap-album').trim() || 'tap-album';
 const SUPABASE_SIGNED_URL_TTL = Number(process.env.SUPABASE_SIGNED_URL_TTL || 3600);
 const SUPABASE_TRACK_URL_TTL = Number(process.env.SUPABASE_TRACK_URL_TTL || 3600);
+const MAX_SUPABASE_SIGNED_URL_TTL = 60 * 60 * 24 * 7;
+const SUPABASE_TRACK_PERSISTED_URL_TTL = Number(
+  process.env.SUPABASE_TRACK_PERSISTED_URL_TTL || MAX_SUPABASE_SIGNED_URL_TTL
+);
 const SUPABASE_CACHE_CONTROL = process.env.SUPABASE_CACHE_CONTROL || '3600';
 const SUPABASE_AUTH_SITE_URL = normalizeAppUrl(process.env.SUPABASE_AUTH_SITE_URL || APP_URL);
 const SUPABASE_AUTH_REDIRECT_URLS = String(process.env.SUPABASE_AUTH_REDIRECT_URLS || '')
@@ -224,6 +228,7 @@ const getStorageStatus = () => ({
   supabaseBucket: SUPABASE_BUCKET || null,
   supabaseBucketPublic: SUPABASE_BUCKET_PUBLIC,
   supabaseTrackUrlTtl: SUPABASE_TRACK_URL_TTL,
+  supabaseTrackPersistedUrlTtl: SUPABASE_TRACK_PERSISTED_URL_TTL,
   supabaseKeyType: SUPABASE_KEY_TYPE,
   s3Configured: hasS3Config(),
   bucket: S3_BUCKET || null,
@@ -286,6 +291,57 @@ const signAssetKey = async (key) => {
   }
 
   return `/uploads/${key}`;
+};
+
+const normalizeSignedUrlTtl = (value, fallbackSeconds = 3600) => {
+  const numeric = Number(value);
+  const fallback = Number.isFinite(Number(fallbackSeconds))
+    ? Math.max(60, Math.floor(Number(fallbackSeconds)))
+    : 3600;
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return Math.min(MAX_SUPABASE_SIGNED_URL_TTL, Math.max(60, Math.floor(numeric)));
+};
+
+const resolveTrackPlaybackUrlFromStoragePath = async (
+  storagePath,
+  { longLived = false } = {}
+) => {
+  const key = String(storagePath || '').trim();
+  if (!isSafeAssetKey(key)) {
+    throw new Error('Track storage path is invalid.');
+  }
+
+  if (supabase) {
+    if (SUPABASE_BUCKET_PUBLIC === true) {
+      const { data } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(key);
+      const publicUrl = String(data?.publicUrl || '').trim();
+      if (!publicUrl) {
+        throw new Error('Supabase public URL is missing.');
+      }
+      return publicUrl;
+    }
+
+    const ttlSeconds = normalizeSignedUrlTtl(
+      longLived ? SUPABASE_TRACK_PERSISTED_URL_TTL : SUPABASE_TRACK_URL_TTL,
+      longLived ? MAX_SUPABASE_SIGNED_URL_TTL : SUPABASE_TRACK_URL_TTL
+    );
+    const { data, error } = await supabase
+      .storage
+      .from(SUPABASE_BUCKET)
+      .createSignedUrl(key, ttlSeconds);
+    if (error || !data?.signedUrl) {
+      throw error || new Error('Supabase signed URL failed.');
+    }
+    return data.signedUrl;
+  }
+
+  const signed = await signAssetKey(key);
+  if (!signed) {
+    throw new Error('Track storage URL could not be resolved.');
+  }
+  return signed;
 };
 
 const signAssetRef = async (ref) => {
@@ -355,7 +411,8 @@ const buildObjectKey = ({ assetKind, projectId, trackId, extension }) => {
   const base = prefix ? `${prefix}/` : '';
 
   if (assetKind === 'track-audio') {
-    return `projects/${projectId}/tracks/${version}.mp3`;
+    const stableTrackId = String(trackId || '').trim() || version;
+    return `albums/${projectId}/tracks/${stableTrackId}.mp3`;
   }
   if (assetKind === 'track-artwork') {
     return `${base}artwork/${projectId}/${trackId}/${version}.${extension}`;
@@ -611,7 +668,11 @@ app.post('/api/uploads/presign', async (req, res) => {
       uploadUrl: data.signedUrl,
       assetRef,
       method: 'PUT',
-      headers: { 'x-upsert': 'true' },
+      headers: {
+        'x-upsert': 'true',
+        'content-type': resolvedContentType,
+        'cache-control': SUPABASE_CACHE_CONTROL
+      },
       cacheControl: SUPABASE_CACHE_CONTROL,
       storage: 'supabase'
     });
@@ -998,6 +1059,18 @@ const normalizeTrackStoragePath = (value, fallback = '') => {
     }
   }
   return null;
+};
+const normalizeTrackAudioPath = (value, storageFallback = '', mp3Fallback = '') =>
+  normalizeTrackStoragePath(value, storageFallback || mp3Fallback || '');
+const normalizeTrackAudioUrl = (value, fallback = '') => {
+  const primary = String(value || '').trim();
+  if (primary) {
+    return primary;
+  }
+  const legacy = String(fallback || '').trim();
+  if (!legacy) return null;
+  if (isAssetRef(legacy)) return null;
+  return legacy;
 };
 const ownerUserIdFromData = (data) => {
   const projectData = data && typeof data === 'object' ? data : {};
@@ -2517,6 +2590,108 @@ app.patch('/api/projects/:projectId/cover', async (req, res) => {
   }
 });
 
+app.post('/api/projects/:projectId/tracks/:trackId/audio-url', async (req, res) => {
+  const safeProjectId = safeSegment(req.params.projectId);
+  const safeTrackId = safeSegment(req.params.trackId);
+  if (!safeProjectId || !safeTrackId) {
+    return res.status(400).json({ message: 'projectId and trackId are required.' });
+  }
+  if (!IS_DEV && !isAdminRequest(req)) {
+    return res.status(401).json({ message: 'Admin token required.' });
+  }
+  const ownerScope = IS_DEV ? ADMIN_OWNER_USER_ID : getAdminOwnerScope(req);
+  if (!ownerScope) {
+    return res.status(401).json({ message: 'Admin owner scope is required.' });
+  }
+
+  try {
+    const trackResult = await query(
+      `
+      SELECT t.*, p.data AS project_data
+      FROM tracks t
+      JOIN projects p ON p.project_id = t.project_id
+      WHERE t.project_id = $1
+        AND t.track_id = $2
+      LIMIT 1
+      `,
+      [safeProjectId, safeTrackId]
+    );
+    if (trackResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Track not found.' });
+    }
+
+    const trackRow = trackResult.rows[0];
+    const rowOwner = ownerUserIdFromData(trackRow.project_data);
+    if (rowOwner !== ownerScope) {
+      return res.status(404).json({ message: 'Track not found.' });
+    }
+
+    const requestedStoragePath = normalizeTrackAudioPath(
+      req.body?.storagePath ?? req.body?.storage_path,
+      '',
+      ''
+    );
+    const storagePath = requestedStoragePath || normalizeTrackAudioPath(
+      trackRow.audio_path,
+      trackRow.storage_path,
+      trackRow.mp3_url
+    );
+    if (!storagePath) {
+      return res.status(400).json({ message: 'Track storage path is missing.' });
+    }
+
+    const audioUrl = await resolveTrackPlaybackUrlFromStoragePath(storagePath, {
+      longLived: true
+    });
+
+    const updateResult = await query(
+      `
+      UPDATE tracks
+      SET storage_path = COALESCE(NULLIF(BTRIM(storage_path), ''), $3),
+          audio_path = $3,
+          audio_url = $4,
+          updated_at = NOW()
+      WHERE project_id = $1
+        AND track_id = $2
+      RETURNING *
+      `,
+      [safeProjectId, safeTrackId, storagePath, audioUrl]
+    );
+    const updated = updateResult.rows[0];
+    const updatedStoragePath = normalizeTrackStoragePath(updated.storage_path, updated.mp3_url) || '';
+    const updatedAudioPath =
+      normalizeTrackAudioPath(updated.audio_path, updatedStoragePath, updated.mp3_url) || updatedStoragePath;
+    const updatedAudioUrl = normalizeTrackAudioUrl(updated.audio_url, updated.mp3_url) || audioUrl;
+    const mp3Url = updatedStoragePath
+      ? createAssetRef(updatedStoragePath)
+      : String(updated.mp3_url || '').trim();
+
+    res.set('Cache-Control', 'no-store');
+    return res.json({
+      success: true,
+      track: {
+        trackId: updated.track_id,
+        projectId: updated.project_id,
+        title: updated.title || 'Untitled',
+        trackNo: Number(updated.track_no || 0),
+        sortOrder: Number(updated.sort_order || 0),
+        storagePath: updatedStoragePath,
+        audioPath: updatedAudioPath,
+        audio_path: updatedAudioPath,
+        audioUrl: updatedAudioUrl,
+        audio_url: updatedAudioUrl,
+        mp3Url: mp3Url || updatedAudioUrl || '',
+        artworkUrl: updated.artwork_url || '',
+        createdAt: updated.created_at,
+        updatedAt: updated.updated_at
+      }
+    });
+  } catch (err) {
+    console.error('Track audio URL save failed:', err);
+    return res.status(500).json({ message: 'Unable to save track audio URL.' });
+  }
+});
+
 app.post('/api/projects/sync', async (req, res) => {
   const { project, tracks } = req.body || {};
   if (!project || !project.projectId || !project.slug) {
@@ -2616,12 +2791,17 @@ app.post('/api/projects/sync', async (req, res) => {
       const sortOrder = Number.isFinite(sortOrderValue)
         ? Math.max(0, Math.floor(sortOrderValue))
         : trackNo;
+      const rawAudioPath = track.audioPath ?? track.audio_path ?? track.storagePath;
       const storagePath = normalizeTrackStoragePath(track.storagePath, track.mp3Url);
-      const legacyMp3Url = storagePath ? null : String(track.mp3Url || '').trim() || null;
+      const audioPath = normalizeTrackAudioPath(rawAudioPath, storagePath, track.mp3Url);
+      const normalizedStoragePath = storagePath || audioPath;
+      const legacyMp3Url = normalizedStoragePath ? null : String(track.mp3Url || '').trim() || null;
+      const rawAudioUrl = track.audioUrl ?? track.audio_url;
+      const audioUrl = normalizeTrackAudioUrl(rawAudioUrl, legacyMp3Url);
 
       await client.query(
-        `INSERT INTO tracks (track_id, project_id, title, mp3_url, artwork_url, sort_order, track_no, storage_path, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
+        `INSERT INTO tracks (track_id, project_id, title, mp3_url, artwork_url, sort_order, track_no, storage_path, audio_path, audio_url, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`,
         [
           trackId,
           payload.projectId,
@@ -2630,7 +2810,9 @@ app.post('/api/projects/sync', async (req, res) => {
           track.artworkUrl || null,
           sortOrder,
           trackNo,
-          storagePath
+          normalizedStoragePath,
+          audioPath,
+          audioUrl
         ]
       );
     }
@@ -2699,6 +2881,10 @@ app.get('/api/projects/:slug', async (req, res) => {
 
     const tracks = trackResult.rows.map((track, index) => {
       const storagePath = normalizeTrackStoragePath(track.storage_path, track.mp3_url);
+      const audioPath =
+        normalizeTrackAudioPath(track.audio_path, storagePath, track.mp3_url) || storagePath || '';
+      const audioUrl =
+        normalizeTrackAudioUrl(track.audio_url, storagePath ? '' : track.mp3_url) || '';
       const trackNoValue = Number(track.track_no ?? track.sort_order ?? index + 1);
       const trackNo = Number.isFinite(trackNoValue)
         ? Math.max(1, Math.floor(trackNoValue))
@@ -2716,8 +2902,12 @@ app.get('/api/projects/:slug', async (req, res) => {
         projectId: track.project_id,
         title: track.title,
         trackNo,
-        storagePath: storagePath || '',
-        mp3Url: mp3Url || '',
+        storagePath: storagePath || audioPath || '',
+        audioPath,
+        audio_path: audioPath,
+        audioUrl,
+        audio_url: audioUrl,
+        mp3Url: mp3Url || audioUrl || '',
         artworkUrl: track.artwork_url || '',
         sortOrder,
         createdAt: track.created_at
@@ -2733,6 +2923,7 @@ app.get('/api/projects/:slug', async (req, res) => {
 
       const suspectUrls = [
         project.coverImageUrl,
+        ...tracks.map((t) => t.audioUrl),
         ...tracks.map((t) => t.mp3Url),
         ...tracks.map((t) => t.artworkUrl)
       ].filter(Boolean);

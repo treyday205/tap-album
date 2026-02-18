@@ -49,6 +49,9 @@ const EditorPage: React.FC = () => {
   const [isPlayingPreview, setIsPlayingPreview] = useState(false);
   const [downloadingTrackId, setDownloadingTrackId] = useState<string | null>(null);
   const [downloadSuccessId, setDownloadSuccessId] = useState<string | null>(null);
+  const [savingUrlTrackId, setSavingUrlTrackId] = useState<string | null>(null);
+  const [copiedUrlTrackId, setCopiedUrlTrackId] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [uploadingTrackId, setUploadingTrackId] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -93,12 +96,25 @@ const EditorPage: React.FC = () => {
   const [unlockActivityError, setUnlockActivityError] = useState<string | null>(null);
   const [syncTick, setSyncTick] = useState(0);
   const syncTimeoutRef = useRef<number | null>(null);
+  const toastTimeoutRef = useRef<number | null>(null);
+  const copiedUrlTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (import.meta.env.DEV) {
       console.log('[DEV] Security tab mode:', SECURITY_V2_ENABLED ? 'V2' : 'V1');
     }
   }, [SECURITY_V2_ENABLED]);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimeoutRef.current) {
+        window.clearTimeout(toastTimeoutRef.current);
+      }
+      if (copiedUrlTimeoutRef.current) {
+        window.clearTimeout(copiedUrlTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const toSafeNonNegativeNumber = (value: unknown, fallback = 0) => {
     const normalized = Number(value);
@@ -245,6 +261,40 @@ const EditorPage: React.FC = () => {
     [resolveAsset]
   );
 
+  const showToast = useCallback((message: string) => {
+    setToastMessage(message);
+    if (toastTimeoutRef.current) {
+      window.clearTimeout(toastTimeoutRef.current);
+    }
+    toastTimeoutRef.current = window.setTimeout(() => {
+      setToastMessage(null);
+      toastTimeoutRef.current = null;
+    }, 2200);
+  }, []);
+
+  const copyTextToClipboard = async (value: string) => {
+    const text = String(value || '').trim();
+    if (!text) {
+      throw new Error('Track URL is empty.');
+    }
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', 'true');
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    const didCopy = document.execCommand('copy');
+    document.body.removeChild(area);
+    if (!didCopy) {
+      throw new Error('Clipboard access failed.');
+    }
+  };
+
   const ensureSignedAssets = async (refs: string[]) => {
     if (!project) return;
     const missing = refs
@@ -349,6 +399,7 @@ const EditorPage: React.FC = () => {
     if (!project) return;
     const values = [
       project.coverImageUrl,
+      ...tracks.map((track) => track.audioUrl),
       ...tracks.map((track) => track.mp3Url),
       ...tracks.map((track) => track.artworkUrl)
     ];
@@ -502,6 +553,8 @@ const EditorPage: React.FC = () => {
             projectId: projectId!,
             title: autoTitle(file.name),
             mp3Url: '',
+            audioUrl: '',
+            audioPath: '',
             storagePath: '',
             trackNo: tracks.length + newTracks.length + 1,
             sortOrder: tracks.length + newTracks.length + 1,
@@ -534,18 +587,56 @@ const EditorPage: React.FC = () => {
           if (!assetRef) {
             throw new Error('Upload did not return a file URL.');
           }
+          const nextStoragePath = storagePathFromTrackValue(assetRef);
           handleUpdateTrack(trackId, {
             mp3Url: assetRef,
-            storagePath: storagePathFromTrackValue(assetRef),
+            storagePath: nextStoragePath,
+            audioPath: nextStoragePath,
+            audioUrl: '',
             title: autoTitle(file.name)
           });
           ensureSignedAssets([assetRef]);
+          try {
+            const adminToken = localStorage.getItem('tap_admin_token') || undefined;
+            const persisted = await Api.saveTrackAudioUrl(
+              projectId,
+              trackId,
+              { storagePath: nextStoragePath },
+              adminToken
+            );
+            const persistedTrack = persisted?.track || {};
+            const persistedAudioUrl = String(
+              persistedTrack.audioUrl ||
+              persistedTrack.audio_url ||
+              ''
+            ).trim();
+            const persistedAudioPath = String(
+              persistedTrack.audioPath ||
+              persistedTrack.audio_path ||
+              persistedTrack.storagePath ||
+              persistedTrack.storage_path ||
+              nextStoragePath
+            ).trim();
+            if (persistedAudioUrl) {
+              handleUpdateTrack(trackId, {
+                audioUrl: persistedAudioUrl,
+                audioPath: persistedAudioPath || nextStoragePath,
+                storagePath: persistedAudioPath || nextStoragePath
+              });
+            }
+          } catch (persistErr) {
+            if (import.meta.env.DEV) {
+              console.warn('[DEV] track audio URL auto-save failed', persistErr);
+            }
+          }
           setUploadError(null);
         } catch (err: any) {
           try {
             const localRef = await storeLocalAudioAsset(file, { projectId, trackId });
             handleUpdateTrack(trackId, {
               mp3Url: localRef,
+              audioUrl: localRef,
+              audioPath: '',
               storagePath: '',
               title: autoTitle(file.name)
             });
@@ -716,6 +807,8 @@ const EditorPage: React.FC = () => {
       projectId: projectId!,
       title: 'New Track',
       mp3Url: '',
+      audioUrl: '',
+      audioPath: '',
       storagePath: '',
       trackNo: tracks.length + 1,
       sortOrder: tracks.length + 1,
@@ -734,7 +827,24 @@ const EditorPage: React.FC = () => {
   const handleUpdateTrack = (id: string, updates: Partial<Track>) => {
     const normalizedUpdates: Partial<Track> = { ...updates };
     if (Object.prototype.hasOwnProperty.call(updates, 'mp3Url')) {
-      normalizedUpdates.storagePath = storagePathFromTrackValue(updates.mp3Url) || '';
+      const normalizedMp3 = String(updates.mp3Url || '').trim();
+      const normalizedStoragePath = storagePathFromTrackValue(normalizedMp3) || '';
+      const hasExplicitAudioPath = Object.prototype.hasOwnProperty.call(updates, 'audioPath');
+      const hasExplicitAudioUrl = Object.prototype.hasOwnProperty.call(updates, 'audioUrl');
+
+      normalizedUpdates.storagePath = normalizedStoragePath;
+      if (!hasExplicitAudioPath) {
+        normalizedUpdates.audioPath = normalizedStoragePath;
+      }
+      if (!hasExplicitAudioUrl) {
+        normalizedUpdates.audioUrl = normalizedStoragePath ? '' : normalizedMp3;
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(updates, 'audioPath')) {
+      const normalizedAudioPath = String(updates.audioPath || '').trim();
+      normalizedUpdates.audioPath = normalizedAudioPath;
+      normalizedUpdates.storagePath = normalizedAudioPath || normalizedUpdates.storagePath || '';
     }
 
     const updatedTracks = tracks.map((t, index) => {
@@ -751,6 +861,61 @@ const EditorPage: React.FC = () => {
     if (normalizedUpdates.mp3Url && normalizedUpdates.mp3Url.includes('spotify.com') && !normalizedUpdates.mp3Url.includes('p.scdn.co')) {
       const targetTrack = updatedTracks.find(t => t.trackId === id);
       if (targetTrack) handleMagicResolve(targetTrack);
+    }
+  };
+
+  const handleSaveTrackUrl = async (track: Track) => {
+    if (!projectId) {
+      alert('Missing project ID for track URL save.');
+      return;
+    }
+
+    setSavingUrlTrackId(track.trackId);
+    try {
+      const token = localStorage.getItem('tap_admin_token') || undefined;
+      const response = await Api.saveTrackAudioUrl(
+        projectId,
+        track.trackId,
+        { storagePath: String(track.audioPath || track.storagePath || '').trim() },
+        token
+      );
+      const payload = response?.track || {};
+      const audioUrl = String(payload.audioUrl || payload.audio_url || '').trim();
+      const audioPath = String(
+        payload.audioPath ||
+        payload.audio_path ||
+        payload.storagePath ||
+        payload.storage_path ||
+        track.audioPath ||
+        track.storagePath ||
+        ''
+      ).trim();
+
+      if (!audioUrl) {
+        throw new Error('Track URL is unavailable.');
+      }
+
+      handleUpdateTrack(track.trackId, {
+        audioUrl,
+        audioPath,
+        storagePath: audioPath || '',
+        mp3Url: String(track.mp3Url || payload.mp3Url || '').trim()
+      });
+
+      await copyTextToClipboard(audioUrl);
+      setCopiedUrlTrackId(track.trackId);
+      if (copiedUrlTimeoutRef.current) {
+        window.clearTimeout(copiedUrlTimeoutRef.current);
+      }
+      copiedUrlTimeoutRef.current = window.setTimeout(() => {
+        setCopiedUrlTrackId((current) => (current === track.trackId ? null : current));
+        copiedUrlTimeoutRef.current = null;
+      }, 2000);
+      showToast('Track URL copied');
+    } catch (err: any) {
+      alert(err?.message || 'Unable to save track URL.');
+    } finally {
+      setSavingUrlTrackId(null);
     }
   };
 
@@ -793,12 +958,17 @@ const EditorPage: React.FC = () => {
     }
   };
 
-  const togglePreview = (track: Track) => {
+  const togglePreview = async (track: Track) => {
     if (!audioPreviewRef.current) return;
     if (previewingTrackId === track.trackId && isPlayingPreview) {
       stopPreview();
     } else {
-      const resolvedUrl = resolveAsset(track.mp3Url || '');
+      let resolvedUrl = '';
+      try {
+        resolvedUrl = await resolveTrackAudioForPreview(track, { reason: 'manual' });
+      } catch {
+        resolvedUrl = resolveAsset(String(track.audioUrl || track.mp3Url || ''));
+      }
       if (!resolvedUrl) {
         alert("Audio not available yet.");
         return;
@@ -820,7 +990,14 @@ const EditorPage: React.FC = () => {
   };
 
   const handleDownloadTrack = async (track: Track) => {
-    const url = resolveAsset(track.mp3Url || '').trim();
+    let url = resolveAsset(String(track.audioUrl || track.mp3Url || '')).trim();
+    if (!url && String(track.audioPath || track.storagePath || '').trim()) {
+      try {
+        url = await resolveTrackAudioForPreview(track, { reason: 'manual' });
+      } catch {
+        url = '';
+      }
+    }
     if (!url) return;
 
     setDownloadingTrackId(track.trackId);
@@ -916,6 +1093,11 @@ const EditorPage: React.FC = () => {
       <input type="file" ref={projectImageInputRef} className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, 'PROJECT_IMAGE')} />
       <input type="file" ref={trackImageInputRef} className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, 'TRACK_IMAGE')} />
       <input type="file" ref={trackAudioInputRef} className="hidden" accept=".mp3,audio/mpeg" multiple onChange={(e) => handleFileUpload(e, 'TRACK_AUDIO')} />
+      {toastMessage && (
+        <div className="fixed bottom-6 right-6 z-50 rounded-xl border border-green-400/40 bg-slate-900/95 px-4 py-2 text-[11px] font-black uppercase tracking-[0.2em] text-green-300 shadow-xl">
+          {toastMessage}
+        </div>
+      )}
 
       <div className="sticky top-0 z-30 bg-slate-950/80 backdrop-blur-md border-b border-slate-800 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-4">
@@ -1029,12 +1211,15 @@ const EditorPage: React.FC = () => {
                   isPlayingPreview={isPlayingPreview}
                   downloadingTrackId={downloadingTrackId}
                   downloadSuccessId={downloadSuccessId}
+                  savingUrlTrackId={savingUrlTrackId}
+                  copiedUrlTrackId={copiedUrlTrackId}
                   resolvingTrackId={resolvingTrackId}
                   handleAddTrack={handleAddTrack}
                   handleUpdateTrack={handleUpdateTrack}
                   triggerFileUpload={triggerFileUpload}
                   togglePreview={togglePreview}
                   handleDownloadTrack={handleDownloadTrack}
+                  handleSaveTrackUrl={handleSaveTrackUrl}
                   handleMagicResolve={handleMagicResolve}
                   handleDeleteTrack={handleDeleteTrack}
                   resolveAsset={resolveAsset}

@@ -12,12 +12,15 @@ type EditorTracklistTabProps = {
   isPlayingPreview: boolean;
   downloadingTrackId: string | null;
   downloadSuccessId: string | null;
+  savingUrlTrackId: string | null;
+  copiedUrlTrackId: string | null;
   resolvingTrackId: string | null;
   handleAddTrack: () => void;
   handleUpdateTrack: (trackId: string, updates: Partial<Track>) => void;
   triggerFileUpload: (type: 'PROJECT_IMAGE' | 'TRACK_IMAGE' | 'TRACK_AUDIO', trackId?: string) => void;
   togglePreview: (track: Track) => void;
   handleDownloadTrack: (track: Track) => void;
+  handleSaveTrackUrl: (track: Track) => void;
   handleMagicResolve: (track: Track) => void;
   handleDeleteTrack: (trackId: string) => void;
   resolveAsset: (value: string) => string;
@@ -32,12 +35,15 @@ const EditorTracklistTab: React.FC<EditorTracklistTabProps> = ({
   isPlayingPreview,
   downloadingTrackId,
   downloadSuccessId,
+  savingUrlTrackId,
+  copiedUrlTrackId,
   resolvingTrackId,
   handleAddTrack,
   handleUpdateTrack,
   triggerFileUpload,
   togglePreview,
   handleDownloadTrack,
+  handleSaveTrackUrl,
   handleMagicResolve,
   handleDeleteTrack,
   resolveAsset
@@ -55,10 +61,19 @@ const EditorTracklistTab: React.FC<EditorTracklistTabProps> = ({
         const isUploading = uploadingTrackId === track.trackId;
         const uploadPercent = uploadProgress[track.trackId] ?? 0;
         const isSecureAudio = isAssetRef(track.mp3Url);
-        const hasStoragePath = String(track.storagePath || '').trim().length > 0;
+        const hasAudioPath = String(track.audioPath || '').trim().length > 0;
+        const hasStoragePath = String(track.storagePath || '').trim().length > 0 || hasAudioPath;
         const isDataAudio = track.mp3Url.startsWith('data:');
         const isBankAudio = track.mp3Url.startsWith('bank:');
         const isLocalOnlyAudio = (isDataAudio || isBankAudio) && !hasStoragePath;
+        const hasAudioSource = Boolean(
+          String(track.mp3Url || '').trim() ||
+          String(track.audioUrl || '').trim() ||
+          hasStoragePath ||
+          hasAudioPath
+        );
+        const isSavingUrl = savingUrlTrackId === track.trackId;
+        const audioUrlValue = String(track.audioUrl || '').trim();
         const displayMp3Value = track.mp3Url.startsWith('data:')
           ? 'Local Audio File'
           : isBankAudio
@@ -109,7 +124,7 @@ const EditorTracklistTab: React.FC<EditorTracklistTabProps> = ({
               )}
               <div className="flex items-center justify-between">
                 <div className="flex gap-2">
-                  {track.mp3Url && (
+                  {hasAudioSource && (
                     <>
                       <button onClick={() => togglePreview(track)} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${previewingTrackId === track.trackId && isPlayingPreview ? 'bg-red-500 text-white' : 'bg-green-500/10 text-green-400 hover:bg-green-500/20'}`}>
                         {previewingTrackId === track.trackId && isPlayingPreview ? <Pause size={12} /> : <Play size={12} />}
@@ -123,6 +138,14 @@ const EditorTracklistTab: React.FC<EditorTracklistTabProps> = ({
                         {downloadingTrackId === track.trackId ? <Loader2 size={12} className="animate-spin" /> : downloadSuccessId === track.trackId ? <CheckCircle2 size={12} /> : <Download size={12} />}
                         {downloadSuccessId === track.trackId ? 'Saved' : 'Save MP3'}
                       </button>
+                      <button
+                        onClick={() => handleSaveTrackUrl(track)}
+                        disabled={isSavingUrl || !hasAudioSource}
+                        className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${copiedUrlTrackId === track.trackId ? 'bg-green-500/20 text-green-500' : 'bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed'}`}
+                      >
+                        {isSavingUrl ? <Loader2 size={12} className="animate-spin" /> : copiedUrlTrackId === track.trackId ? <CheckCircle2 size={12} /> : <Download size={12} />}
+                        {isSavingUrl ? 'Saving...' : copiedUrlTrackId === track.trackId ? 'Copied' : 'Save URL'}
+                      </button>
                     </>
                   )}
                   {!track.mp3Url.startsWith('data:') && !isSecureAudio && track.mp3Url && (
@@ -133,6 +156,18 @@ const EditorTracklistTab: React.FC<EditorTracklistTabProps> = ({
                 </div>
                 <button onClick={() => handleDeleteTrack(track.trackId)} className="p-2 text-slate-700 hover:text-red-500 transition-colors"><Trash2 size={18} /></button>
               </div>
+              {audioUrlValue && (
+                <div className="space-y-1">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Track URL</p>
+                  <input
+                    type="text"
+                    readOnly
+                    value={audioUrlValue}
+                    className="w-full bg-slate-900/70 border border-slate-700 rounded-xl px-3 py-2 text-[11px] text-slate-300 focus:outline-none"
+                    onFocus={(event) => event.currentTarget.select()}
+                  />
+                </div>
+              )}
             </div>
           </div>
         );

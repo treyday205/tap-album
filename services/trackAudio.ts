@@ -114,11 +114,20 @@ const getStorageClient = (): SupabaseClient | null => {
   return fallbackStorageClient;
 };
 
+const getTrackPreferredAudioValue = (track: Track): string => {
+  const explicitAudioUrl = String(track.audioUrl || '').trim();
+  if (explicitAudioUrl) return explicitAudioUrl;
+  return String(track.mp3Url || '').trim();
+};
+
 export const extractTrackStoragePath = (track: Track): string => {
+  const explicitAudioPath = String(track.audioPath || '').trim();
+  if (explicitAudioPath) return explicitAudioPath;
+
   const explicit = String(track.storagePath || '').trim();
   if (explicit) return explicit;
 
-  const raw = String(track.mp3Url || '').trim();
+  const raw = getTrackPreferredAudioValue(track);
   if (raw.startsWith(ASSET_REF_PREFIX)) {
     return raw.slice(ASSET_REF_PREFIX.length);
   }
@@ -177,8 +186,18 @@ export const resolveRuntimeTrackAudioUrl = async ({
   forceRefresh?: boolean;
 }): Promise<{ url: string; expiresAt: number; storagePath: string }> => {
   const storagePath = extractTrackStoragePath(track);
+  const preferredAudioUrl = getTrackPreferredAudioValue(track);
   if (!storagePath) {
-    return { url: String(track.mp3Url || '').trim(), expiresAt: 0, storagePath: '' };
+    return { url: preferredAudioUrl, expiresAt: 0, storagePath: '' };
+  }
+
+  if (
+    !forceRefresh &&
+    preferredAudioUrl &&
+    !preferredAudioUrl.startsWith(ASSET_REF_PREFIX) &&
+    !preferredAudioUrl.toLowerCase().startsWith('bank:')
+  ) {
+    return { url: preferredAudioUrl, expiresAt: Number.MAX_SAFE_INTEGER, storagePath };
   }
 
   const bucket = String(storage.bucket || DEFAULT_BUCKET).trim() || DEFAULT_BUCKET;
@@ -239,15 +258,17 @@ const resolveFallbackTrackAudioUrl = async ({
   resolveBankAssetUrls?: (refs: string[]) => Promise<Record<string, string>>;
   onBankAssetsResolved?: (resolved: Record<string, string>) => void;
 }): Promise<{ url: string; source: 'asset' | 'bank' }> => {
-  const rawMp3Value = String(track.mp3Url || '').trim();
-  const fallback = String(resolveAssetUrl(rawMp3Value) || '').trim();
+  const preferredValue = getTrackPreferredAudioValue(track);
+  const fallback = String(resolveAssetUrl(preferredValue) || '').trim();
   if (fallback) {
     return { url: fallback, source: 'asset' };
   }
 
-  if (isBankRef(rawMp3Value) && resolveBankAssetUrls) {
-    const bankResolved = await resolveBankAssetUrls([rawMp3Value]);
-    const bankUrl = String(bankResolved[rawMp3Value] || '').trim();
+  const rawMp3Value = String(track.mp3Url || '').trim();
+  const bankRef = [preferredValue, rawMp3Value].find((value) => isBankRef(value)) || '';
+  if (bankRef && resolveBankAssetUrls) {
+    const bankResolved = await resolveBankAssetUrls([bankRef]);
+    const bankUrl = String(bankResolved[bankRef] || '').trim();
     if (bankUrl) {
       onBankAssetsResolved?.(bankResolved);
       return { url: bankUrl, source: 'bank' };
@@ -307,7 +328,7 @@ export const createTrackAudioUrlResolver = ({
       if (cached?.url) {
         return finish(cached.url, 'storage', true);
       }
-      const fallback = String(resolveAssetUrl(String(track.mp3Url || '')) || '').trim();
+      const fallback = String(resolveAssetUrl(getTrackPreferredAudioValue(track)) || '').trim();
       if (fallback) {
         return finish(fallback, 'asset');
       }
@@ -327,7 +348,7 @@ export const createTrackAudioUrlResolver = ({
       };
       return finish(resolved.url, 'storage');
     } catch (error) {
-      const fallback = String(resolveAssetUrl(String(track.mp3Url || '')) || '').trim();
+      const fallback = String(resolveAssetUrl(getTrackPreferredAudioValue(track)) || '').trim();
       if (fallback) {
         return finish(fallback, 'asset');
       }

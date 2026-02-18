@@ -33,6 +33,7 @@ Notes:
 - If `RESEND_API_KEY`/`RESEND_FROM` are not set in dev, the legacy backend magic-link endpoint logs the link to the console.
 - For S3/R2 direct uploads and signed GETs, configure bucket CORS to allow `PUT`, `GET`, and `HEAD` from your app origin.
 - Keep the bucket private; the app uses signed GET URLs for protected playback and artwork.
+- For Supabase Storage audio playback on iOS/PWA, ensure bucket CORS allows your app origin for `GET`/`HEAD` (and range requests), and keep MP3 objects stored with `Content-Type: audio/mpeg`.
 
 ## Supabase Email Auth Setup
 
