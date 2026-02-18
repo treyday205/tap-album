@@ -25,6 +25,7 @@ interface TAPRendererProps {
   onPlayerStateChange?: (state: { isPlaying: boolean; currentTrackId: string | null }) => void;
   showInstallButton?: boolean;
   onInstallClick?: () => void;
+  suppressBenignPlaybackErrors?: boolean;
 }
 
 const formatTime = (value: number): string => {
@@ -50,7 +51,8 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   resolveTrackAudioUrl,
   onPlayerStateChange,
   showInstallButton = false,
-  onInstallClick
+  onInstallClick,
+  suppressBenignPlaybackErrors = false
 }) => {
   const [currentlyPlayingTrackId, setCurrentlyPlayingTrackId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -114,6 +116,19 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     } catch {
       return raw;
     }
+  };
+
+  const isBenignSwitchPlaybackError = (value: unknown): boolean => {
+    const errorName = String((value as { name?: string } | null)?.name || '').trim().toLowerCase();
+    const message = String((value as { message?: string } | null)?.message || value || '')
+      .trim()
+      .toLowerCase();
+    return (
+      errorName === 'aborterror' ||
+      message.includes('interrupted by a call to pause') ||
+      message.includes('the play() request was interrupted') ||
+      message.includes('play() request was interrupted')
+    );
   };
 
   const canPlayTrack = (track: Track, resolvedUrl: string) => {
@@ -472,10 +487,13 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
         audio.paused ||
         audio.ended ||
         Boolean(audio.error);
+      const isSwitchingTracks = currentlyPlayingTrackId !== track.trackId;
 
       if (shouldReplaceSource && canReplaceSource) {
         clearStallRecoveryTimer();
-        audio.pause();
+        if (isPlaying && isSwitchingTracks) {
+          audio.pause();
+        }
         audio.removeAttribute('src');
         audio.load();
         audio.src = playableUrl;
@@ -499,7 +517,17 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
       if (!isPreview) StorageService.logEvent(project.projectId, EventType.TRACK_PLAY, track.title);
     } catch (err: any) {
       const message = toSafeTrackPlaybackErrorMessage(err);
-      setPlaybackError(message);
+      const isBenignSwitchError = isBenignSwitchPlaybackError(err);
+      if (suppressBenignPlaybackErrors && isBenignSwitchError) {
+        setPlaybackError(null);
+        console.debug('[AUDIO] benign playback interruption suppressed', {
+          projectId: project.projectId,
+          trackId: track.trackId,
+          error: message
+        });
+      } else {
+        setPlaybackError(message);
+      }
       setIsPlaying(false);
       clearStallRecoveryTimer();
       if (currentlyPlayingTrackId === track.trackId) {

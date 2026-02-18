@@ -1449,6 +1449,7 @@ const PublicTAPPage: React.FC = () => {
           useGoLiveHeader={isPublicGoLiveRoute}
           resolveAssetUrl={resolveAsset}
           resolveTrackAudioUrl={resolveTrackAudioForPlayback}
+          suppressBenignPlaybackErrors={true}
           onPlayerStateChange={handlePlayerStateChange}
           showInstallButton={showInstallButton}
           onInstallClick={handleInstallClick}

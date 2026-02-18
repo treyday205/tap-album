@@ -1274,6 +1274,7 @@ const PublicTAPPage: React.FC = () => {
       useGoLiveHeader: isPublicGoLiveRoute,
       resolveAssetUrl: resolveAsset,
       resolveTrackAudioUrl: resolveTrackAudioForPlayback,
+      suppressBenignPlaybackErrors: true,
       onPlayerStateChange: handlePlayerStateChange,
       coverSizes: '(max-width: 480px) 84vw, (max-width: 768px) 72vw, 360px',
       showInstallButton,
