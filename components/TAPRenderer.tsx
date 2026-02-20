@@ -61,6 +61,9 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const activeTrackRef = useRef<Track | null>(null);
+  const isPlayingRef = useRef(false);
+  const currentlyPlayingTrackIdRef = useRef<string | null>(null);
+  const displayTracksRef = useRef<Track[]>([]);
   const manualPauseRef = useRef(false);
   const stallRetryTimerRef = useRef<number | null>(null);
   const isRecovering = useRef(false);
@@ -415,6 +418,14 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   };
 
   useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  useEffect(() => {
+    currentlyPlayingTrackIdRef.current = currentlyPlayingTrackId;
+  }, [currentlyPlayingTrackId]);
+
+  useEffect(() => {
     if (!onPlayerStateChange) return;
     onPlayerStateChange({
       isPlaying,
@@ -431,6 +442,23 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
         audioRef.current.pause();
         audioRef.current.removeAttribute('src');
         audioRef.current.load();
+      }
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        const mediaSession = navigator.mediaSession;
+        try {
+          mediaSession.metadata = null;
+        } catch {
+          // noop
+        }
+        try {
+          mediaSession.setActionHandler('play', null);
+          mediaSession.setActionHandler('pause', null);
+          mediaSession.setActionHandler('previoustrack', null);
+          mediaSession.setActionHandler('nexttrack', null);
+          mediaSession.setActionHandler('seekto', null);
+        } catch {
+          // noop
+        }
       }
     };
   }, []);
@@ -516,6 +544,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
       clearStallRecoveryTimer();
       setIsPlaying(true);
       setCurrentlyPlayingTrackId(track.trackId);
+      setMediaSession(toMediaSessionTrack(track));
       logAudioEvent('play', audio, { reason: 'user-toggle' });
       if (!isPreview) StorageService.logEvent(project.projectId, EventType.TRACK_PLAY, track.title);
     } catch (err: any) {
@@ -585,6 +614,150 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     );
   });
   const displayTracks = showAllTracks ? tracks : mp3Tracks;
+
+  useEffect(() => {
+    displayTracksRef.current = displayTracks;
+  }, [displayTracks]);
+
+  type MediaSessionTrack = {
+    title: string;
+    artist?: string;
+    album?: string;
+    coverUrl?: string;
+  };
+
+  const toMediaSessionTrack = (track: Track | null): MediaSessionTrack | null => {
+    if (!track) return null;
+
+    const candidate = track as Track & {
+      artist?: string;
+      artistName?: string;
+      album?: string;
+      albumTitle?: string;
+      coverUrl?: string;
+    };
+    const title = String(candidate.title || '').trim();
+    if (!title) return null;
+
+    const artist = String(candidate.artist || candidate.artistName || project.artistName || '').trim();
+    const album = String(candidate.album || candidate.albumTitle || project.title || '').trim() || 'Tap Album™';
+    const trackArtwork = resolveUrl(candidate.coverUrl || candidate.artworkUrl || '');
+    const albumArtwork = resolveUrl(project.coverImageUrl || '');
+    const coverUrl = String(trackArtwork || albumArtwork || '').trim();
+
+    return {
+      title,
+      artist,
+      album,
+      coverUrl
+    };
+  };
+
+  const setMediaSession = (track: MediaSessionTrack | null) => {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
+
+    const mediaSession = navigator.mediaSession;
+    const title = String(track?.title || project.title || '').trim() || 'Tap Album™';
+    const artist = String(track?.artist || project.artistName || '').trim();
+    const album = String(track?.album || project.title || '').trim() || 'Tap Album™';
+    const albumArtwork = resolveUrl(project.coverImageUrl || '');
+    const coverUrl = String(track?.coverUrl || albumArtwork || '').trim();
+
+    if (typeof MediaMetadata !== 'undefined') {
+      const artwork = coverUrl
+        ? [{ src: coverUrl, sizes: '512x512', type: 'image/png' }]
+        : [];
+      mediaSession.metadata = new MediaMetadata({
+        title,
+        artist,
+        album,
+        ...(artwork.length ? { artwork } : {})
+      });
+    }
+
+    try {
+      const isAudioPlaying = Boolean(audioRef.current && !audioRef.current.paused);
+      mediaSession.playbackState = isAudioPlaying || isPlayingRef.current ? 'playing' : 'paused';
+    } catch {
+      // noop
+    }
+
+    const setActionHandler = (
+      action: MediaSessionAction,
+      handler: MediaSessionActionHandler | null
+    ) => {
+      try {
+        mediaSession.setActionHandler(action, handler);
+      } catch {
+        // unsupported action on this browser
+      }
+    };
+
+    const getQueueTrackByOffset = (offset: -1 | 1): Track | null => {
+      const queue = displayTracksRef.current;
+      if (queue.length === 0) return null;
+      const currentTrackId = currentlyPlayingTrackIdRef.current || activeTrackRef.current?.trackId || null;
+      const currentIndex = currentTrackId
+        ? queue.findIndex((item) => item.trackId === currentTrackId)
+        : -1;
+      if (currentIndex < 0) {
+        return offset === 1 ? queue[0] : queue[queue.length - 1];
+      }
+      const nextIndex = currentIndex + offset;
+      if (nextIndex < 0 || nextIndex >= queue.length) return null;
+      return queue[nextIndex];
+    };
+
+    setActionHandler('play', () => {
+      const audio = audioRef.current;
+      if (audio && String(audio.src || '').trim()) {
+        manualPauseRef.current = false;
+        if (audio.paused) {
+          void audio.play().catch(() => {
+            const activeTrack = activeTrackRef.current;
+            if (activeTrack) void handleTogglePlay(activeTrack);
+          });
+        }
+        return;
+      }
+      const activeTrack = activeTrackRef.current || displayTracksRef.current[0];
+      if (activeTrack && !isPlayingRef.current) {
+        void handleTogglePlay(activeTrack);
+      }
+    });
+
+    setActionHandler('pause', () => {
+      const audio = audioRef.current;
+      if (!audio) return;
+      manualPauseRef.current = true;
+      audio.pause();
+    });
+
+    setActionHandler('previoustrack', () => {
+      const previousTrack = getQueueTrackByOffset(-1);
+      if (previousTrack) void handleTogglePlay(previousTrack);
+    });
+
+    setActionHandler('nexttrack', () => {
+      const nextTrack = getQueueTrackByOffset(1);
+      if (nextTrack) void handleTogglePlay(nextTrack);
+    });
+
+    setActionHandler('seekto', (details) => {
+      const audio = audioRef.current;
+      if (!audio) return;
+      const seekTime = Number(details.seekTime);
+      if (!Number.isFinite(seekTime)) return;
+      const maxTime = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : seekTime;
+      const target = Math.min(Math.max(0, seekTime), maxTime);
+      if (details.fastSeek && typeof audio.fastSeek === 'function') {
+        audio.fastSeek(target);
+      } else {
+        audio.currentTime = target;
+      }
+      setCurrentTime(target);
+    });
+  };
 
   const listWrapperClass = isPreview ? 'px-0 pb-10' : 'px-3 pb-8';
   const listClass = isPreview
@@ -682,10 +855,12 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
           manualPauseRef.current = false;
           clearStallRecoveryTimer();
           setIsPlaying(true);
+          setMediaSession(toMediaSessionTrack(activeTrackRef.current));
           logAudioEvent('play', event.currentTarget, { reason: 'audio-event' });
         }}
         onPause={(event) => {
           setIsPlaying(false);
+          setMediaSession(toMediaSessionTrack(activeTrackRef.current));
           logAudioEvent('pause', event.currentTarget, { reason: manualPauseRef.current ? 'user-pause' : 'audio-event' });
         }}
         onStalled={(event) => {
@@ -715,6 +890,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
         onLoadedMetadata={(event) => {
           const next = Number(event.currentTarget.duration);
           setDuration(Number.isFinite(next) ? next : 0);
+          setMediaSession(toMediaSessionTrack(activeTrackRef.current));
           logAudioEvent('loadedmetadata', event.currentTarget);
         }}
         onDurationChange={(event) => {
