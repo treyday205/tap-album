@@ -9,9 +9,8 @@ export type TrackStorageRecovery = {
 };
 
 const getTrackUrlCandidates = (track: Track): string[] => {
-  const dynamicTrack = track as Track & { trackUrl?: string };
   const candidates = [
-    String(dynamicTrack.trackUrl || '').trim(),
+    String(track.trackUrl || '').trim(),
     String(track.mp3Url || '').trim(),
     String(track.audioUrl || '').trim()
   ].filter(Boolean);

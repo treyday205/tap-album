@@ -966,10 +966,15 @@ const EditorPage: React.FC = () => {
     if (Object.prototype.hasOwnProperty.call(updates, 'mp3Url')) {
       const normalizedMp3 = String(updates.mp3Url || '').trim();
       const normalizedStoragePath = storagePathFromTrackValue(normalizedMp3) || '';
+      const normalizedTrackUrl = normalizedStoragePath ? '' : normalizedMp3;
       const hasExplicitAudioPath = Object.prototype.hasOwnProperty.call(updates, 'audioPath');
       const hasExplicitAudioUrl = Object.prototype.hasOwnProperty.call(updates, 'audioUrl');
+      const hasExplicitTrackUrl = Object.prototype.hasOwnProperty.call(updates, 'trackUrl');
 
       normalizedUpdates.storagePath = normalizedStoragePath;
+      normalizedUpdates.trackUrl = hasExplicitTrackUrl
+        ? String(updates.trackUrl || '').trim()
+        : normalizedTrackUrl;
       if (!hasExplicitAudioPath) {
         normalizedUpdates.audioPath = normalizedStoragePath;
       }
@@ -1007,7 +1012,7 @@ const EditorPage: React.FC = () => {
       return;
     }
 
-    const trackUrl = String(track.mp3Url || track.audioUrl || '').trim();
+    const trackUrl = String(track.trackUrl || track.mp3Url || track.audioUrl || '').trim();
     const parsedStorageFromUrl = deriveTrackStorageTarget(trackUrl);
     const derivedStoragePath = String(
       track.audioPath || track.storagePath || parsedStorageFromUrl?.storagePath || ''
@@ -1045,6 +1050,13 @@ const EditorPage: React.FC = () => {
         track.storagePath ||
         ''
       ).trim();
+      const persistedTrackUrl = String(
+        payload.trackUrl ||
+        payload.track_url ||
+        track.trackUrl ||
+        trackUrl ||
+        ''
+      ).trim();
 
       if (!audioUrl) {
         throw new Error('Track URL is unavailable.');
@@ -1054,6 +1066,7 @@ const EditorPage: React.FC = () => {
         audioUrl,
         audioPath,
         storagePath: audioPath || '',
+        trackUrl: persistedTrackUrl,
         mp3Url: String(track.mp3Url || payload.mp3Url || '').trim()
       });
 

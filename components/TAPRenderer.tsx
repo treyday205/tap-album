@@ -69,6 +69,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   const isRecovering = useRef(false);
   const stallRecoveryAttemptsRef = useRef(0);
   const lastTimeUpdateLogSecondRef = useRef(-1);
+  const playRequestSeqRef = useRef(0);
 
   const clearStallRecoveryTimer = () => {
     if (typeof window !== 'undefined' && stallRetryTimerRef.current !== null) {
@@ -180,7 +181,50 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     });
   };
 
-  const rangeCheckPlayableUrl = async (url: string, track: Track) => {
+  const resetAudioElementForSwitch = async (
+    audio: HTMLAudioElement,
+    { clearSource = true }: { clearSource?: boolean } = {}
+  ) => {
+    const wasPlaying = !audio.paused;
+    audio.pause();
+
+    if (wasPlaying && !audio.paused) {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          audio.removeEventListener('pause', finish);
+          resolve();
+        };
+        audio.addEventListener('pause', finish, { once: true });
+        window.setTimeout(finish, 120);
+      });
+    }
+
+    try {
+      audio.currentTime = 0;
+    } catch {
+      // Some browsers block immediate seek while source is changing.
+    }
+
+    if (clearSource) {
+      audio.removeAttribute('src');
+      audio.load();
+    }
+  };
+
+  const probeTrackAudioUrl = async (
+    url: string,
+    track: Track,
+    context: 'manual' | 'refresh' | 'audio-error'
+  ): Promise<{
+    ok: boolean;
+    status: number | null;
+    failureType: 'http' | 'cors' | 'network' | null;
+    message: string;
+    error: string;
+  }> => {
     try {
       const response = await fetch(url, {
         method: 'GET',
@@ -193,6 +237,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
       const ok = response.status === 200 || response.status === 206;
       console.log('[AUDIO]', {
         event: 'url-health-check',
+        context,
         method: 'GET',
         range: 'bytes=0-0',
         projectId: project.projectId,
@@ -201,20 +246,47 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
         ok,
         url
       });
-      return ok ? null : `Track unavailable (HTTP ${response.status})`;
+      if (ok) {
+        return {
+          ok: true,
+          status: response.status,
+          failureType: null,
+          message: '',
+          error: ''
+        };
+      }
+      return {
+        ok: false,
+        status: response.status,
+        failureType: 'http',
+        message: `Track unavailable (HTTP ${response.status})`,
+        error: ''
+      };
     } catch (error: any) {
+      const errorMessage = String(error?.message || error || 'network error').trim();
+      const isCorsLike =
+        /failed to fetch|networkerror|cors|blocked|load failed/i.test(errorMessage) ||
+        (typeof navigator !== 'undefined' && navigator.onLine);
       console.log('[AUDIO]', {
         event: 'url-health-check',
+        context,
         method: 'GET',
         range: 'bytes=0-0',
         projectId: project.projectId,
         trackId: track.trackId,
         status: 0,
         ok: false,
+        failureType: isCorsLike ? 'cors' : 'network',
         url,
-        error: String(error?.message || error || 'network error')
+        error: errorMessage
       });
-      return 'Track unavailable (network)';
+      return {
+        ok: false,
+        status: null,
+        failureType: isCorsLike ? 'cors' : 'network',
+        message: isCorsLike ? 'Track unavailable (CORS)' : 'Track unavailable (network)',
+        error: errorMessage
+      };
     }
   };
 
@@ -435,6 +507,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
 
   useEffect(() => {
     return () => {
+      playRequestSeqRef.current += 1;
       clearStallRecoveryTimer();
       activeTrackRef.current = null;
       manualPauseRef.current = false;
@@ -467,9 +540,15 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     if (!audioRef.current) return;
 
     const audio = audioRef.current;
+    const requestSeq = playRequestSeqRef.current + 1;
+    playRequestSeqRef.current = requestSeq;
+    const isActiveRequest = () => playRequestSeqRef.current === requestSeq;
     setPlaybackError(null);
 
-    if (currentlyPlayingTrackId === track.trackId && isPlaying) {
+    const currentTrackId = currentlyPlayingTrackIdRef.current;
+    const sameTrack = currentTrackId === track.trackId;
+    const wasPlaying = isPlayingRef.current;
+    if (sameTrack && wasPlaying) {
       manualPauseRef.current = true;
       clearStallRecoveryTimer();
       audio.pause();
@@ -480,14 +559,29 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
 
     manualPauseRef.current = false;
     activeTrackRef.current = track;
+    const isSwitchingTracks = Boolean(currentTrackId && currentTrackId !== track.trackId);
+    const hasStoragePath = Boolean(String(track.audioPath || track.storagePath || '').trim());
 
     try {
+      if (isSwitchingTracks) {
+        clearStallRecoveryTimer();
+        await resetAudioElementForSwitch(audio, { clearSource: true });
+        if (!isActiveRequest()) return;
+        setIsPlaying(false);
+        setCurrentTime(0);
+        setDuration(0);
+      }
+
       const rawUrl = getTrackAudioValue(track);
       const fallbackUrl = resolveUrl(rawUrl);
       let playableUrl = fallbackUrl;
 
       if (resolveTrackAudioUrl) {
-        const resolved = await resolveTrackAudioUrl(track, { reason: 'manual' });
+        const resolved = await resolveTrackAudioUrl(track, {
+          reason: 'manual',
+          forceRefresh: isSwitchingTracks && hasStoragePath
+        });
+        if (!isActiveRequest()) return;
         playableUrl = String(resolved || '').trim() || fallbackUrl;
       }
 
@@ -495,51 +589,66 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
         throw new Error('Audio URL is missing or invalid.');
       }
 
-      let probeError = await rangeCheckPlayableUrl(playableUrl, track);
-      if (probeError && resolveTrackAudioUrl) {
+      let probeResult = await probeTrackAudioUrl(playableUrl, track, 'manual');
+      if (!isActiveRequest()) return;
+
+      if (!probeResult.ok && resolveTrackAudioUrl) {
+        console.warn('[AUDIO] track URL probe failed', {
+          projectId: project.projectId,
+          trackId: track.trackId,
+          context: 'manual',
+          status: probeResult.status ?? (probeResult.failureType === 'cors' ? 'CORS' : 'NETWORK'),
+          failureType: probeResult.failureType || 'http',
+          url: playableUrl,
+          error: probeResult.error || probeResult.message
+        });
         const refreshed = await resolveTrackAudioUrl(track, {
           forceRefresh: true,
           reason: 'probe'
         });
+        if (!isActiveRequest()) return;
         playableUrl = String(refreshed || '').trim() || playableUrl;
         if (isPlayableAudioUrl(playableUrl)) {
-          probeError = await rangeCheckPlayableUrl(playableUrl, track);
+          probeResult = await probeTrackAudioUrl(playableUrl, track, 'refresh');
+          if (!isActiveRequest()) return;
         }
       }
-      if (probeError) {
-        throw new Error(probeError);
+      if (!probeResult.ok) {
+        console.warn('[AUDIO] track URL probe failed', {
+          projectId: project.projectId,
+          trackId: track.trackId,
+          context: 'refresh',
+          status: probeResult.status ?? (probeResult.failureType === 'cors' ? 'CORS' : 'NETWORK'),
+          failureType: probeResult.failureType || 'http',
+          url: playableUrl,
+          error: probeResult.error || probeResult.message
+        });
+        if (probeResult.failureType !== 'cors') {
+          throw new Error(probeResult.message || 'Track unavailable.');
+        }
       }
 
       const shouldReplaceSource =
-        currentlyPlayingTrackId !== track.trackId ||
-        normalizeRuntimeAudioUrl(String(audio.currentSrc || '')) !== normalizeRuntimeAudioUrl(playableUrl);
-      const canReplaceSource =
-        currentlyPlayingTrackId !== track.trackId ||
-        audio.paused ||
-        audio.ended ||
-        Boolean(audio.error);
-      const isSwitchingTracks = currentlyPlayingTrackId !== track.trackId;
+        normalizeRuntimeAudioUrl(String(audio.currentSrc || audio.src || '')) !==
+        normalizeRuntimeAudioUrl(playableUrl);
 
-      if (shouldReplaceSource && canReplaceSource) {
+      if (shouldReplaceSource) {
         clearStallRecoveryTimer();
-        if (isPlaying && isSwitchingTracks) {
-          audio.pause();
-        }
-        audio.removeAttribute('src');
-        audio.load();
+        await resetAudioElementForSwitch(audio, { clearSource: true });
+        if (!isActiveRequest()) return;
         audio.src = playableUrl;
         audio.load();
         setCurrentTime(0);
         setDuration(0);
-      } else if (shouldReplaceSource && !canReplaceSource) {
-        logAudioEvent('source-refresh-skipped', audio, {
-          reason: 'active-playback-no-error'
-        });
       }
 
       const playPromise = audio.play();
       if (playPromise !== undefined) {
         await playPromise;
+      }
+      if (!isActiveRequest()) {
+        audio.pause();
+        return;
       }
       clearStallRecoveryTimer();
       setIsPlaying(true);
@@ -548,6 +657,9 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
       logAudioEvent('play', audio, { reason: 'user-toggle' });
       if (!isPreview) StorageService.logEvent(project.projectId, EventType.TRACK_PLAY, track.title);
     } catch (err: any) {
+      if (!isActiveRequest()) {
+        return;
+      }
       const message = toSafeTrackPlaybackErrorMessage(err);
       const isBenignSwitchError = isBenignSwitchPlaybackError(err);
       if (suppressBenignPlaybackErrors && isBenignSwitchError) {
@@ -562,7 +674,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
       }
       setIsPlaying(false);
       clearStallRecoveryTimer();
-      if (currentlyPlayingTrackId === track.trackId) {
+      if (currentlyPlayingTrackIdRef.current === track.trackId) {
         setCurrentlyPlayingTrackId(null);
         activeTrackRef.current = null;
       }
@@ -873,6 +985,21 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
         }}
         onError={(event) => {
           const code = event.currentTarget.error?.code || 0;
+          const failingTrack = activeTrackRef.current;
+          const failingUrl = String(event.currentTarget.currentSrc || event.currentTarget.src || '').trim();
+          if (failingTrack && failingUrl) {
+            void probeTrackAudioUrl(failingUrl, failingTrack, 'audio-error').then((probeResult) => {
+              if (probeResult.ok) return;
+              console.warn('[AUDIO] audio-element source failed', {
+                projectId: project.projectId,
+                trackId: failingTrack.trackId,
+                status: probeResult.status ?? (probeResult.failureType === 'cors' ? 'CORS' : 'NETWORK'),
+                failureType: probeResult.failureType || 'http',
+                url: failingUrl,
+                error: probeResult.error || probeResult.message
+              });
+            });
+          }
           logAudioEvent('error', event.currentTarget, { reason: 'audio-element-error', code });
           setPlaybackError(`Playback error (code ${code || 'unknown'})`);
           startStallRecovery('error');

@@ -61,6 +61,7 @@ export interface Track {
   projectId: string;
   title: string;
   mp3Url: string;
+  trackUrl?: string;
   audioUrl?: string;
   audioPath?: string;
   storagePath?: string;

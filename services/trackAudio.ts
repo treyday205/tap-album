@@ -121,24 +121,47 @@ const getTrackPreferredAudioValue = (track: Track): string => {
   return String(track.mp3Url || '').trim();
 };
 
-export const extractTrackStoragePath = (track: Track): string => {
+const resolveTrackStorageTarget = (
+  track: Track
+): { storagePath: string; bucket: string } => {
   const explicitAudioPath = String(track.audioPath || '').trim();
-  if (explicitAudioPath) return explicitAudioPath;
-
-  const explicit = String(track.storagePath || '').trim();
-  if (explicit) return explicit;
-
-  const raw = getTrackPreferredAudioValue(track);
-  if (raw.startsWith(ASSET_REF_PREFIX)) {
-    return raw.slice(ASSET_REF_PREFIX.length);
+  if (explicitAudioPath) {
+    return { storagePath: explicitAudioPath, bucket: '' };
   }
 
-  const parsedSupabase = parseSupabaseStorageObjectUrl(raw);
-  if (parsedSupabase?.storagePath) {
-    return parsedSupabase.storagePath;
+  const explicitStoragePath = String(track.storagePath || '').trim();
+  if (explicitStoragePath) {
+    return { storagePath: explicitStoragePath, bucket: '' };
   }
 
-  return '';
+  const rawCandidates = [
+    String(track.trackUrl || '').trim(),
+    String(track.audioUrl || '').trim(),
+    String(track.mp3Url || '').trim()
+  ].filter(Boolean);
+
+  for (const raw of rawCandidates) {
+    if (raw.startsWith(ASSET_REF_PREFIX)) {
+      return {
+        storagePath: raw.slice(ASSET_REF_PREFIX.length),
+        bucket: ''
+      };
+    }
+
+    const parsedSupabase = parseSupabaseStorageObjectUrl(raw);
+    if (parsedSupabase?.storagePath) {
+      return {
+        storagePath: parsedSupabase.storagePath,
+        bucket: parsedSupabase.bucket
+      };
+    }
+  }
+
+  return { storagePath: '', bucket: '' };
+};
+
+export const extractTrackStoragePath = (track: Track): string => {
+  return resolveTrackStorageTarget(track).storagePath;
 };
 
 const resolveSignedUrlTtl = (value: number | undefined): number => {
@@ -192,7 +215,8 @@ export const resolveRuntimeTrackAudioUrl = async ({
   cache: SignedTrackUrlCache;
   forceRefresh?: boolean;
 }): Promise<{ url: string; expiresAt: number; storagePath: string }> => {
-  const storagePath = extractTrackStoragePath(track);
+  const storageTarget = resolveTrackStorageTarget(track);
+  const storagePath = storageTarget.storagePath;
   const preferredAudioUrl = getTrackPreferredAudioValue(track);
   if (!storagePath) {
     return { url: preferredAudioUrl, expiresAt: 0, storagePath: '' };
@@ -207,10 +231,11 @@ export const resolveRuntimeTrackAudioUrl = async ({
     return { url: preferredAudioUrl, expiresAt: Number.MAX_SAFE_INTEGER, storagePath };
   }
 
-  const bucket = String(storage.bucket || DEFAULT_BUCKET).trim() || DEFAULT_BUCKET;
+  const configuredBucket = String(storage.bucket || DEFAULT_BUCKET).trim() || DEFAULT_BUCKET;
+  const bucket = String(storageTarget.bucket || configuredBucket).trim() || configuredBucket;
   const isPublic = storage.isPublic === true;
   const ttlSeconds = resolveSignedUrlTtl(storage.signedUrlTtl);
-  const cacheKey = String(track.trackId || '').trim() || storagePath;
+  const cacheKey = String(track.trackId || '').trim() || `${bucket}/${storagePath}`;
 
   if (!isPublic && !forceRefresh) {
     const cached = cache[cacheKey];

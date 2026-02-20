@@ -2765,6 +2765,7 @@ app.post('/api/projects/:projectId/tracks/:trackId/audio-url', async (req, res) 
     const mp3Url = updatedStoragePath
       ? createAssetRef(updatedStoragePath)
       : String(updated.mp3_url || '').trim();
+    const persistedTrackUrl = String(updated.mp3_url || '').trim();
 
     res.set('Cache-Control', 'no-store');
     return res.json({
@@ -2780,6 +2781,7 @@ app.post('/api/projects/:projectId/tracks/:trackId/audio-url', async (req, res) 
         audio_path: updatedAudioPath,
         audioUrl: updatedAudioUrl,
         audio_url: updatedAudioUrl,
+        trackUrl: persistedTrackUrl || '',
         mp3Url: mp3Url || updatedAudioUrl || '',
         artworkUrl: updated.artwork_url || '',
         createdAt: updated.created_at,
@@ -2895,7 +2897,7 @@ app.post('/api/projects/sync', async (req, res) => {
       const storagePath = normalizeTrackStoragePath(track.storagePath, track.mp3Url);
       const audioPath = normalizeTrackAudioPath(rawAudioPath, storagePath, track.mp3Url);
       const normalizedStoragePath = storagePath || audioPath;
-      const rawTrackUrl = String(track.mp3Url || '').trim();
+      const rawTrackUrl = String(track.trackUrl || track.mp3Url || '').trim();
       const normalizedTrackUrl = rawTrackUrl && !isAssetRef(rawTrackUrl) ? rawTrackUrl : '';
       const legacyMp3Url = normalizedTrackUrl || null;
       const rawAudioUrl = track.audioUrl ?? track.audio_url;
@@ -2990,6 +2992,7 @@ app.get('/api/projects/:slug', async (req, res) => {
         normalizeTrackAudioPath(track.audio_path, storagePath, track.mp3_url) || storagePath || '';
       const audioUrl =
         normalizeTrackAudioUrl(track.audio_url, storagePath ? '' : track.mp3_url) || '';
+      const trackUrl = String(track.mp3_url || '').trim();
       const trackNoValue = Number(track.track_no ?? track.sort_order ?? index + 1);
       const trackNo = Number.isFinite(trackNoValue)
         ? Math.max(1, Math.floor(trackNoValue))
@@ -3012,6 +3015,7 @@ app.get('/api/projects/:slug', async (req, res) => {
         audio_path: audioPath,
         audioUrl,
         audio_url: audioUrl,
+        trackUrl: trackUrl || '',
         mp3Url: mp3Url || audioUrl || '',
         artworkUrl: track.artwork_url || '',
         sortOrder,
