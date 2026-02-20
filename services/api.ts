@@ -431,7 +431,7 @@ export const Api = {
   saveTrackAudioUrl: (
     projectId: string,
     trackId: string,
-    payload?: { storagePath?: string },
+    payload?: { storagePath?: string | null; trackUrl?: string | null },
     token?: string
   ) =>
     request(`/api/projects/${encodeURIComponent(projectId)}/tracks/${encodeURIComponent(trackId)}/audio-url`, {

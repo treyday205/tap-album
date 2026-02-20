@@ -7,6 +7,11 @@ import { Api, API_BASE_URL } from '../services/api';
 import { ShieldAlert, Mail, ArrowRight, Loader2, CheckCircle2, XCircle, Key } from 'lucide-react';
 import { collectAssetRefs, resolveAssetUrl, isAssetRef } from '../services/assets';
 import { collectBankRefs, resolveBankUrls } from '../services/assetBank';
+import {
+  applyTrackStorageRecoveries,
+  collectTrackStorageRecoveries,
+  type TrackStorageRecovery
+} from '../services/trackStorageRecovery';
 import { registerSW } from 'virtual:pwa-register';
 import {
   createTrackAudioUrlResolver,
@@ -97,6 +102,11 @@ const PublicTAPPage: React.FC = () => {
     coverImageUrl: string;
     slug?: string;
   } | null>(null);
+  const [recoveryToastMessage, setRecoveryToastMessage] = useState<string | null>(null);
+  const recoveryToastTimeoutRef = useRef<number | null>(null);
+  const recoveryToastShownRef = useRef(false);
+  const storageRecoveryQueueRef = useRef(new Map<string, TrackStorageRecovery>());
+  const storageRecoveryTimerRef = useRef<number | null>(null);
 
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
   const [showIosInstall, setShowIosInstall] = useState(false);
@@ -253,6 +263,85 @@ const PublicTAPPage: React.FC = () => {
     });
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (recoveryToastTimeoutRef.current) {
+        window.clearTimeout(recoveryToastTimeoutRef.current);
+      }
+      if (storageRecoveryTimerRef.current) {
+        window.clearTimeout(storageRecoveryTimerRef.current);
+      }
+    };
+  }, []);
+
+  const showRecoveryToast = useCallback((message: string) => {
+    setRecoveryToastMessage(message);
+    if (recoveryToastTimeoutRef.current) {
+      window.clearTimeout(recoveryToastTimeoutRef.current);
+    }
+    recoveryToastTimeoutRef.current = window.setTimeout(() => {
+      setRecoveryToastMessage(null);
+      recoveryToastTimeoutRef.current = null;
+    }, 2600);
+  }, []);
+
+  const flushStorageRecoveryQueue = useCallback(async (targetProjectId: string) => {
+    const projectKey = String(targetProjectId || '').trim();
+    if (!projectKey) return;
+
+    const queued = Array.from<TrackStorageRecovery>(storageRecoveryQueueRef.current.values());
+    storageRecoveryQueueRef.current.clear();
+    if (queued.length === 0) return;
+
+    const token = localStorage.getItem('tap_admin_token') || undefined;
+    if (!token && !import.meta.env.DEV) {
+      return;
+    }
+
+    const results = await Promise.allSettled(
+      queued.map((item) =>
+        Api.saveTrackAudioUrl(
+          projectKey,
+          item.trackId,
+          {
+            storagePath: item.storagePath,
+            trackUrl: item.trackUrl
+          },
+          token
+        )
+      )
+    );
+
+    const failed = results.filter((result) => result.status === 'rejected').length;
+    if (failed > 0 && IS_DEV) {
+      console.warn('[DEBUG] silent track storage recovery persist failed', {
+        projectId: projectKey,
+        attempted: queued.length,
+        failed
+      });
+    }
+  }, []);
+
+  const queueStorageRecoveryPersist = useCallback((
+    targetProjectId: string,
+    recoveries: TrackStorageRecovery[]
+  ) => {
+    const projectKey = String(targetProjectId || '').trim();
+    if (!projectKey || recoveries.length === 0) return;
+
+    recoveries.forEach((item) => {
+      storageRecoveryQueueRef.current.set(item.trackId, item);
+    });
+
+    if (storageRecoveryTimerRef.current) {
+      window.clearTimeout(storageRecoveryTimerRef.current);
+    }
+    storageRecoveryTimerRef.current = window.setTimeout(() => {
+      storageRecoveryTimerRef.current = null;
+      void flushStorageRecoveryQueue(projectKey);
+    }, 900);
+  }, [flushStorageRecoveryQueue]);
+
   const updateServiceWorkerOnResume = useCallback(async () => {
     if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
     try {
@@ -294,6 +383,15 @@ const PublicTAPPage: React.FC = () => {
       window.removeEventListener('offline', updateOfflineState);
     };
   }, []);
+
+  useEffect(() => {
+    recoveryToastShownRef.current = false;
+    storageRecoveryQueueRef.current.clear();
+    if (storageRecoveryTimerRef.current) {
+      window.clearTimeout(storageRecoveryTimerRef.current);
+      storageRecoveryTimerRef.current = null;
+    }
+  }, [slug]);
 
   useEffect(() => {
     if (!slug || typeof window === 'undefined') return;
@@ -641,6 +739,37 @@ const PublicTAPPage: React.FC = () => {
     }),
     [isPublicGoLiveRoute, project?.projectId, resolveAsset, trackStorage]
   );
+
+  useEffect(() => {
+    const projectId = String(project?.projectId || '').trim();
+    if (!projectId || tracks.length === 0) return;
+
+    const recoveries = collectTrackStorageRecoveries(tracks);
+    if (recoveries.length === 0) return;
+
+    const { tracks: recoveredTracks, recoveredCount } = applyTrackStorageRecoveries(tracks, recoveries);
+    if (recoveredCount === 0) return;
+
+    setTracks(recoveredTracks);
+    queueStorageRecoveryPersist(projectId, recoveries);
+
+    if (!recoveryToastShownRef.current) {
+      recoveryToastShownRef.current = true;
+      showRecoveryToast(`Recovered ${recoveredCount} track${recoveredCount === 1 ? '' : 's'}`);
+    }
+
+    if (IS_DEV) {
+      console.log('[DEBUG] silent storage path recovery applied', {
+        projectId,
+        recoveredCount,
+        recoveries: recoveries.map((item) => ({
+          trackId: item.trackId,
+          bucket: item.bucket,
+          storagePath: item.storagePath
+        }))
+      });
+    }
+  }, [project?.projectId, tracks, queueStorageRecoveryPersist, showRecoveryToast]);
 
   const ensureSignedAssets = async (refs: string[]) => {
     if (!project) return;
@@ -1227,6 +1356,11 @@ const PublicTAPPage: React.FC = () => {
   if (!isUnlocked) {
     return (
       <div className="w-full tap-full-height bg-slate-950 flex flex-col items-center justify-center px-5 sm:px-8 text-center animate-in fade-in duration-700 tap-safe-top tap-safe-bottom">
+        {recoveryToastMessage && (
+          <div className="fixed bottom-6 right-6 z-50 rounded-xl border border-green-400/35 bg-slate-900/95 px-4 py-2 text-[11px] font-black uppercase tracking-[0.2em] text-green-300 shadow-xl">
+            {recoveryToastMessage}
+          </div>
+        )}
         {offlineBanner}
         <div className="w-full max-w-md rounded-[2rem] border border-slate-800/70 bg-slate-900/35 shadow-[0_24px_60px_rgba(0,0,0,0.5)] px-6 py-8 sm:p-8">
           <div className="mb-10 flex flex-col items-center">
@@ -1427,6 +1561,11 @@ const PublicTAPPage: React.FC = () => {
 
   return (
     <div className="w-full tap-full-height bg-slate-950 flex justify-center overflow-hidden">
+      {recoveryToastMessage && (
+        <div className="fixed bottom-6 right-6 z-50 rounded-xl border border-green-400/35 bg-slate-900/95 px-4 py-2 text-[11px] font-black uppercase tracking-[0.2em] text-green-300 shadow-xl">
+          {recoveryToastMessage}
+        </div>
+      )}
       <div className="w-full max-w-[520px] tap-full-height overflow-hidden flex flex-col md:my-3 md:h-[calc(100dvh-1.5rem)] md:rounded-[2rem] md:border md:border-slate-800/70 md:shadow-2xl">
         {offlineBanner}
         {showInstallCard && (

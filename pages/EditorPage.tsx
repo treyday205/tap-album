@@ -9,8 +9,19 @@ import { StorageService } from '../services/storage';
 import { Api } from '../services/api';
 import { Project, Track, ProjectLink, LinkCategory } from '../types';
 import { GoogleGenAI, Type } from "@google/genai";
-import { collectAssetRefs, getAssetKey, isAssetRef, resolveAssetUrl } from '../services/assets';
+import {
+  collectAssetRefs,
+  getAssetKey,
+  isAssetRef,
+  parseSupabaseStorageObjectUrl,
+  resolveAssetUrl
+} from '../services/assets';
 import { collectBankRefs, resolveBankUrls, saveBankAsset } from '../services/assetBank';
+import {
+  applyTrackStorageRecoveries,
+  collectTrackStorageRecoveries,
+  type TrackStorageRecovery
+} from '../services/trackStorageRecovery';
 import {
   createTrackAudioUrlResolver,
   DEFAULT_TRACK_STORAGE,
@@ -98,6 +109,9 @@ const EditorPage: React.FC = () => {
   const syncTimeoutRef = useRef<number | null>(null);
   const toastTimeoutRef = useRef<number | null>(null);
   const copiedUrlTimeoutRef = useRef<number | null>(null);
+  const storageRecoveryToastShownRef = useRef(false);
+  const storageRecoveryQueueRef = useRef(new Map<string, TrackStorageRecovery>());
+  const storageRecoveryTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (import.meta.env.DEV) {
@@ -112,6 +126,9 @@ const EditorPage: React.FC = () => {
       }
       if (copiedUrlTimeoutRef.current) {
         window.clearTimeout(copiedUrlTimeoutRef.current);
+      }
+      if (storageRecoveryTimerRef.current) {
+        window.clearTimeout(storageRecoveryTimerRef.current);
       }
     };
   }, []);
@@ -166,6 +183,15 @@ const EditorPage: React.FC = () => {
       setIsLoadingProject(false);
     }
   }, [projectId, navigate]);
+
+  useEffect(() => {
+    storageRecoveryToastShownRef.current = false;
+    storageRecoveryQueueRef.current.clear();
+    if (storageRecoveryTimerRef.current) {
+      window.clearTimeout(storageRecoveryTimerRef.current);
+      storageRecoveryTimerRef.current = null;
+    }
+  }, [projectId]);
 
   useEffect(() => {
     if (activeTab !== 'security' || !project) return;
@@ -272,6 +298,63 @@ const EditorPage: React.FC = () => {
     }, 2200);
   }, []);
 
+  const flushStorageRecoveryQueue = useCallback(async (targetProjectId: string) => {
+    const projectKey = String(targetProjectId || '').trim();
+    if (!projectKey) return;
+
+    const queued = Array.from<TrackStorageRecovery>(storageRecoveryQueueRef.current.values());
+    storageRecoveryQueueRef.current.clear();
+    if (queued.length === 0) return;
+
+    const token = localStorage.getItem('tap_admin_token') || undefined;
+    if (!token && !import.meta.env.DEV) {
+      return;
+    }
+
+    const results = await Promise.allSettled(
+      queued.map((item) =>
+        Api.saveTrackAudioUrl(
+          projectKey,
+          item.trackId,
+          {
+            storagePath: item.storagePath,
+            trackUrl: item.trackUrl
+          },
+          token
+        )
+      )
+    );
+
+    const failed = results.filter((result) => result.status === 'rejected').length;
+    if (failed > 0 && import.meta.env.DEV) {
+      console.warn('[DEV] silent track storage recovery persist failed', {
+        projectId: projectKey,
+        attempted: queued.length,
+        failed
+      });
+    }
+  }, []);
+
+  const queueStorageRecoveryPersist = useCallback((
+    targetProjectId: string,
+    recoveries: TrackStorageRecovery[]
+  ) => {
+    const projectKey = String(targetProjectId || '').trim();
+    if (!projectKey || recoveries.length === 0) return;
+
+    recoveries.forEach((item) => {
+      storageRecoveryQueueRef.current.set(item.trackId, item);
+    });
+
+    if (storageRecoveryTimerRef.current) {
+      window.clearTimeout(storageRecoveryTimerRef.current);
+    }
+    storageRecoveryTimerRef.current = window.setTimeout(() => {
+      storageRecoveryTimerRef.current = null;
+      void flushStorageRecoveryQueue(projectKey);
+    }, 900);
+  }, [flushStorageRecoveryQueue]);
+
   const copyTextToClipboard = async (value: string) => {
     const text = String(value || '').trim();
     if (!text) {
@@ -294,6 +377,43 @@ const EditorPage: React.FC = () => {
       throw new Error('Clipboard access failed.');
     }
   };
+
+  useEffect(() => {
+    if (!projectId || tracks.length === 0) return;
+
+    const recoveries = collectTrackStorageRecoveries(tracks);
+    if (recoveries.length === 0) return;
+
+    const { tracks: recoveredTracks, recoveredCount } = applyTrackStorageRecoveries(tracks, recoveries);
+    if (recoveredCount === 0) return;
+
+    setTracks(recoveredTracks);
+    const recoveredTrackIds = new Set(recoveries.map((item) => item.trackId));
+    recoveredTracks.forEach((track) => {
+      if (recoveredTrackIds.has(track.trackId)) {
+        StorageService.saveTrack(track);
+      }
+    });
+
+    queueStorageRecoveryPersist(projectId, recoveries);
+
+    if (!storageRecoveryToastShownRef.current) {
+      storageRecoveryToastShownRef.current = true;
+      showToast(`Recovered ${recoveredCount} track${recoveredCount === 1 ? '' : 's'}`);
+    }
+
+    if (import.meta.env.DEV) {
+      console.log('[DEV] silent storage path recovery applied', {
+        projectId,
+        recoveredCount,
+        recoveries: recoveries.map((item) => ({
+          trackId: item.trackId,
+          bucket: item.bucket,
+          storagePath: item.storagePath
+        }))
+      });
+    }
+  }, [projectId, tracks, queueStorageRecoveryPersist, showToast]);
 
   const ensureSignedAssets = async (refs: string[]) => {
     if (!project) return;
@@ -350,11 +470,28 @@ const EditorPage: React.FC = () => {
       reader.readAsDataURL(file);
     });
 
-  const storagePathFromTrackValue = (value: string | undefined | null) => {
+  const deriveTrackStorageTarget = (value: string | undefined | null) => {
     const trimmed = String(value || '').trim();
-    if (!isAssetRef(trimmed)) return '';
-    return getAssetKey(trimmed);
+    if (!trimmed) return null;
+
+    if (isAssetRef(trimmed)) {
+      return {
+        bucket: null as string | null,
+        storagePath: getAssetKey(trimmed)
+      };
+    }
+
+    const parsedSupabase = parseSupabaseStorageObjectUrl(trimmed);
+    if (!parsedSupabase) return null;
+
+    return {
+      bucket: parsedSupabase.bucket,
+      storagePath: parsedSupabase.storagePath
+    };
   };
+
+  const storagePathFromTrackValue = (value: string | undefined | null) =>
+    deriveTrackStorageTarget(value)?.storagePath || '';
 
   const storeLocalImageAsset = async (
     file: File,
@@ -870,13 +1007,31 @@ const EditorPage: React.FC = () => {
       return;
     }
 
+    const trackUrl = String(track.mp3Url || track.audioUrl || '').trim();
+    const parsedStorageFromUrl = deriveTrackStorageTarget(trackUrl);
+    const derivedStoragePath = String(
+      track.audioPath || track.storagePath || parsedStorageFromUrl?.storagePath || ''
+    ).trim();
+
+    if (import.meta.env.DEV) {
+      console.log('[DEV] save track URL derived storage', {
+        trackId: track.trackId,
+        trackUrl: trackUrl || null,
+        bucket: parsedStorageFromUrl?.bucket || null,
+        storagePath: derivedStoragePath || null
+      });
+    }
+
     setSavingUrlTrackId(track.trackId);
     try {
       const token = localStorage.getItem('tap_admin_token') || undefined;
       const response = await Api.saveTrackAudioUrl(
         projectId,
         track.trackId,
-        { storagePath: String(track.audioPath || track.storagePath || '').trim() },
+        {
+          storagePath: derivedStoragePath || null,
+          trackUrl: trackUrl || null
+        },
         token
       );
       const payload = response?.track || {};
@@ -911,7 +1066,11 @@ const EditorPage: React.FC = () => {
         setCopiedUrlTrackId((current) => (current === track.trackId ? null : current));
         copiedUrlTimeoutRef.current = null;
       }, 2000);
-      showToast('Track URL copied');
+      showToast(
+        derivedStoragePath
+          ? `Track URL copied (${derivedStoragePath})`
+          : 'Track URL copied (external URL)'
+      );
     } catch (err: any) {
       alert(err?.message || 'Unable to save track URL.');
     } finally {

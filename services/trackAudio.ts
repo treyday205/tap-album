@@ -7,6 +7,7 @@ import {
   SUPABASE_URL,
   supabaseAuthClient
 } from './supabaseAuth';
+import { parseSupabaseStorageObjectUrl } from './assets';
 
 const ASSET_REF_PREFIX = 'asset:';
 const DEFAULT_BUCKET = 'tap-album';
@@ -131,6 +132,12 @@ export const extractTrackStoragePath = (track: Track): string => {
   if (raw.startsWith(ASSET_REF_PREFIX)) {
     return raw.slice(ASSET_REF_PREFIX.length);
   }
+
+  const parsedSupabase = parseSupabaseStorageObjectUrl(raw);
+  if (parsedSupabase?.storagePath) {
+    return parsedSupabase.storagePath;
+  }
+
   return '';
 };
 

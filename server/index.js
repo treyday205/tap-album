@@ -123,6 +123,15 @@ const SUPABASE_ANON_KEY =
   process.env.VITE_SUPABASE_ANON_KEY ||
   process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 const SUPABASE_BUCKET = String(process.env.SUPABASE_BUCKET || 'tap-album').trim() || 'tap-album';
+const SUPABASE_URL_HOST = (() => {
+  const raw = String(SUPABASE_URL || '').trim();
+  if (!raw) return '';
+  try {
+    return new URL(raw).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+})();
 const SUPABASE_SIGNED_URL_TTL = Number(process.env.SUPABASE_SIGNED_URL_TTL || 3600);
 const SUPABASE_TRACK_URL_TTL = Number(process.env.SUPABASE_TRACK_URL_TTL || 3600);
 const MAX_SUPABASE_SIGNED_URL_TTL = 60 * 60 * 24 * 7;
@@ -1045,10 +1054,74 @@ const normalizeCoverPath = (value) => {
   const normalized = String(value || '').trim();
   return normalized || null;
 };
+const SUPABASE_STORAGE_OBJECT_PATH_REGEX =
+  /^\/storage\/v1\/object\/(?:public|sign|authenticated)\/(.+)$/i;
+const safeDecodeUriComponent = (value) => {
+  try {
+    return decodeURIComponent(String(value || ''));
+  } catch {
+    return String(value || '');
+  }
+};
+const parseSupabaseStorageObjectUrl = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return null;
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    return null;
+  }
+
+  const host = String(parsed.hostname || '').trim().toLowerCase();
+  const isSupabaseHost =
+    host.endsWith('.supabase.co') ||
+    host === 'supabase.co' ||
+    host.endsWith('.supabase.in') ||
+    host === 'supabase.in' ||
+    (SUPABASE_URL_HOST && host === SUPABASE_URL_HOST);
+  if (!isSupabaseHost) {
+    return null;
+  }
+
+  const match = String(parsed.pathname || '').match(SUPABASE_STORAGE_OBJECT_PATH_REGEX);
+  if (!match || !match[1]) return null;
+
+  const decoded = safeDecodeUriComponent(match[1]).replace(/^\/+/, '').trim();
+  if (!decoded || decoded.includes('..')) return null;
+
+  const slashIndex = decoded.indexOf('/');
+  if (slashIndex <= 0 || slashIndex === decoded.length - 1) {
+    return null;
+  }
+
+  const bucket = decoded.slice(0, slashIndex).trim();
+  const storagePath = decoded.slice(slashIndex + 1).replace(/^\/+/, '').trim();
+  if (!bucket || !storagePath || storagePath.includes('..')) {
+    return null;
+  }
+
+  return { bucket, storagePath };
+};
 const normalizeTrackStoragePath = (value, fallback = '') => {
   const primary = String(value || '').trim();
   if (primary && isSafeAssetKey(primary)) {
     return primary;
+  }
+  if (isAssetRef(primary)) {
+    const key = primary.slice(ASSET_REF_PREFIX.length);
+    if (isSafeAssetKey(key)) {
+      return key;
+    }
+  }
+  const primarySupabaseUrl = parseSupabaseStorageObjectUrl(primary);
+  if (primarySupabaseUrl && isSafeAssetKey(primarySupabaseUrl.storagePath)) {
+    return primarySupabaseUrl.storagePath;
   }
 
   const legacy = String(fallback || '').trim();
@@ -1057,6 +1130,10 @@ const normalizeTrackStoragePath = (value, fallback = '') => {
     if (isSafeAssetKey(key)) {
       return key;
     }
+  }
+  const legacySupabaseUrl = parseSupabaseStorageObjectUrl(legacy);
+  if (legacySupabaseUrl && isSafeAssetKey(legacySupabaseUrl.storagePath)) {
+    return legacySupabaseUrl.storagePath;
   }
   return null;
 };
@@ -2626,36 +2703,59 @@ app.post('/api/projects/:projectId/tracks/:trackId/audio-url', async (req, res) 
       return res.status(404).json({ message: 'Track not found.' });
     }
 
-    const requestedStoragePath = normalizeTrackAudioPath(
-      req.body?.storagePath ?? req.body?.storage_path,
-      '',
+    const requestedTrackUrl = normalizeTrackAudioUrl(
+      req.body?.trackUrl ??
+      req.body?.track_url ??
+      req.body?.audioUrl ??
+      req.body?.audio_url ??
+      req.body?.mp3Url ??
+      req.body?.mp3_url,
       ''
     );
-    const storagePath = requestedStoragePath || normalizeTrackAudioPath(
+    const requestStoragePath = normalizeTrackAudioPath(
+      req.body?.storagePath ?? req.body?.storage_path,
+      '',
+      requestedTrackUrl || ''
+    );
+    const rowStoragePath = normalizeTrackAudioPath(
       trackRow.audio_path,
       trackRow.storage_path,
       trackRow.mp3_url
     );
-    if (!storagePath) {
-      return res.status(400).json({ message: 'Track storage path is missing.' });
+    const storagePath = String(requestStoragePath || rowStoragePath || '').trim();
+    const trackUrl = String(
+      requestedTrackUrl || normalizeTrackAudioUrl(trackRow.audio_url, trackRow.mp3_url) || ''
+    ).trim();
+
+    if (!storagePath && !trackUrl) {
+      return res.status(400).json({
+        message: 'Track storage path is missing and no external track URL was provided.'
+      });
     }
 
-    const audioUrl = await resolveTrackPlaybackUrlFromStoragePath(storagePath, {
-      longLived: true
-    });
+    const audioUrl = storagePath
+      ? await resolveTrackPlaybackUrlFromStoragePath(storagePath, {
+          longLived: true
+        })
+      : trackUrl;
 
     const updateResult = await query(
       `
       UPDATE tracks
-      SET storage_path = COALESCE(NULLIF(BTRIM(storage_path), ''), $3),
-          audio_path = $3,
+      SET storage_path = CASE WHEN NULLIF(BTRIM($3), '') IS NULL THEN NULL ELSE $3 END,
+          audio_path = CASE WHEN NULLIF(BTRIM($3), '') IS NULL THEN NULL ELSE $3 END,
           audio_url = $4,
+          mp3_url = CASE
+            WHEN NULLIF(BTRIM($5), '') IS NOT NULL THEN $5
+            WHEN NULLIF(BTRIM($3), '') IS NULL THEN $4
+            ELSE mp3_url
+          END,
           updated_at = NOW()
       WHERE project_id = $1
         AND track_id = $2
       RETURNING *
       `,
-      [safeProjectId, safeTrackId, storagePath, audioUrl]
+      [safeProjectId, safeTrackId, storagePath, audioUrl, trackUrl]
     );
     const updated = updateResult.rows[0];
     const updatedStoragePath = normalizeTrackStoragePath(updated.storage_path, updated.mp3_url) || '';
@@ -2795,9 +2895,14 @@ app.post('/api/projects/sync', async (req, res) => {
       const storagePath = normalizeTrackStoragePath(track.storagePath, track.mp3Url);
       const audioPath = normalizeTrackAudioPath(rawAudioPath, storagePath, track.mp3Url);
       const normalizedStoragePath = storagePath || audioPath;
-      const legacyMp3Url = normalizedStoragePath ? null : String(track.mp3Url || '').trim() || null;
+      const rawTrackUrl = String(track.mp3Url || '').trim();
+      const normalizedTrackUrl = rawTrackUrl && !isAssetRef(rawTrackUrl) ? rawTrackUrl : '';
+      const legacyMp3Url = normalizedTrackUrl || null;
       const rawAudioUrl = track.audioUrl ?? track.audio_url;
-      const audioUrl = normalizeTrackAudioUrl(rawAudioUrl, legacyMp3Url);
+      const audioUrl = normalizeTrackAudioUrl(
+        rawAudioUrl,
+        normalizedStoragePath ? '' : legacyMp3Url || ''
+      );
 
       await client.query(
         `INSERT INTO tracks (track_id, project_id, title, mp3_url, artwork_url, sort_order, track_no, storage_path, audio_path, audio_url, updated_at)
