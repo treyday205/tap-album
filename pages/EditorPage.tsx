@@ -301,9 +301,78 @@ const EditorPage: React.FC = () => {
         if (Object.keys(resolved).length > 0) {
           setAssetUrls((prev) => ({ ...prev, ...resolved }));
         }
+      },
+      resolveSignedStorageUrl: async ({ track, storagePath, bucket, forceRefresh, reason }) => {
+        const normalizedProjectId = String(projectId || '').trim();
+        const normalizedTrackId = String(track.trackId || '').trim();
+        const normalizedStoragePath = String(storagePath || '').trim();
+        if (!normalizedProjectId || !normalizedTrackId || !normalizedStoragePath) {
+          return null;
+        }
+
+        const adminToken = localStorage.getItem('tap_admin_token') || undefined;
+        if (!adminToken && !import.meta.env.DEV) {
+          return null;
+        }
+
+        try {
+          const response = await Api.saveTrackAudioUrl(
+            normalizedProjectId,
+            normalizedTrackId,
+            {
+              storagePath: normalizedStoragePath
+            },
+            adminToken
+          );
+          const payload = response?.track || {};
+          const resolvedUrl = String(payload.audioUrl || payload.audio_url || '').trim();
+          const resolvedBucket = String(
+            payload.storageBucket || payload.storage_bucket || bucket || ''
+          ).trim();
+          if (import.meta.env.DEV) {
+            console.log('[DEV][AUDIO] backend signed preview URL', {
+              projectId: normalizedProjectId,
+              trackId: normalizedTrackId,
+              storagePath: normalizedStoragePath,
+              storageBucket: resolvedBucket || null,
+              reason,
+              forceRefresh: Boolean(forceRefresh),
+              url: resolvedUrl || null
+            });
+          }
+          return resolvedUrl ? { url: resolvedUrl } : null;
+        } catch (error) {
+          if (import.meta.env.DEV) {
+            console.warn('[DEV][AUDIO] backend signed preview URL failed', {
+              projectId: normalizedProjectId,
+              trackId: normalizedTrackId,
+              storagePath: normalizedStoragePath,
+              storageBucket: bucket || null,
+              reason,
+              forceRefresh: Boolean(forceRefresh),
+              error: String((error as { message?: string } | null)?.message || error || 'unknown')
+            });
+          }
+          return null;
+        }
+      },
+      onResolvedUrl: ({ track: resolvedTrack, url, source, reason, storagePath, storageBucket, resolveMode, fromCache }) => {
+        if (!import.meta.env.DEV) return;
+        console.log('[DEV][AUDIO] preview resolved-track-url', {
+          projectId: projectId || null,
+          trackId: resolvedTrack.trackId,
+          title: resolvedTrack.title,
+          reason,
+          source,
+          resolveMode: resolveMode || null,
+          storageBucket: storageBucket || null,
+          storagePath: storagePath || null,
+          fromCache,
+          url
+        });
       }
     }),
-    [resolveAsset]
+    [projectId, resolveAsset]
   );
 
   const showToast = useCallback((message: string) => {
@@ -770,13 +839,22 @@ const EditorPage: React.FC = () => {
           if (!assetRef) {
             throw new Error('Upload did not return a file URL.');
           }
-          const nextStoragePath = storagePathFromTrackValue(assetRef);
-          const nextStorageBucket = defaultStorageBucket;
+          const nextStoragePath = String(
+            result?.storagePath || storagePathFromTrackValue(assetRef)
+          ).trim();
+          if (!nextStoragePath) {
+            throw new Error('Upload did not return a storage path.');
+          }
+          const nextStorageBucket = String(result?.bucket || defaultStorageBucket).trim() || defaultStorageBucket;
           const nextTrackUrl = buildCanonicalSupabaseTrackUrl(nextStoragePath, nextStorageBucket);
           if (import.meta.env.DEV) {
             console.log('[DEV] track upload storage target', {
               projectId,
               trackId,
+              assetRef,
+              presignBucket: String(result?.bucket || '').trim() || null,
+              presignBucketPublic:
+                typeof result?.bucketPublic === 'boolean' ? result.bucketPublic : null,
               storagePath: nextStoragePath || null,
               bucket: nextStorageBucket,
               trackUrl: nextTrackUrl || null

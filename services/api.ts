@@ -283,7 +283,12 @@ export const Api = {
       trackId?: string;
       onProgress?: (percent: number) => void;
     }
-  ): Promise<{ assetRef: string }> =>
+  ): Promise<{
+    assetRef: string;
+    storagePath?: string;
+    bucket?: string;
+    bucketPublic?: boolean;
+  }> =>
     new Promise(async (resolve, reject) => {
       const isTrackAudio = options.assetKind === 'track-audio';
       const contentType = String(file.type || '').trim() || (isTrackAudio ? 'audio/mpeg' : 'application/octet-stream');
@@ -410,7 +415,12 @@ export const Api = {
       try {
         const presign = await requestPresign();
         await uploadWithConfig(presign);
-        resolve({ assetRef: String(presign?.assetRef || '') });
+        resolve({
+          assetRef: String(presign?.assetRef || ''),
+          storagePath: String(presign?.storagePath || '').trim() || undefined,
+          bucket: String(presign?.bucket || '').trim() || undefined,
+          bucketPublic: typeof presign?.bucketPublic === 'boolean' ? presign.bucketPublic : undefined
+        });
       } catch (err: any) {
         reject(err);
       }
@@ -421,7 +431,12 @@ export const Api = {
     projectId: string,
     trackId: string,
     onProgress?: (percent: number) => void
-  ): Promise<{ assetRef: string }> =>
+  ): Promise<{
+    assetRef: string;
+    storagePath?: string;
+    bucket?: string;
+    bucketPublic?: boolean;
+  }> =>
     Api.uploadAsset(file, projectId, {
       assetKind: 'track-audio',
       trackId,

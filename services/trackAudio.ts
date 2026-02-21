@@ -35,9 +35,17 @@ export type TrackAudioUrlResolver = (
   options?: TrackAudioResolveOptions
 ) => Promise<string>;
 
+export type StorageUrlResolveMode = 'public' | 'signed-backend' | 'signed-client';
+
 export type SignedTrackUrlCache = Record<
   string,
-  { url: string; expiresAt: number; storagePath: string }
+  {
+    url: string;
+    expiresAt: number;
+    storagePath: string;
+    storageBucket?: string;
+    resolveMode?: StorageUrlResolveMode;
+  }
 >;
 
 type PlayerState = {
@@ -47,12 +55,32 @@ type PlayerState = {
 
 type ResolvedAudioUrlSource = 'storage' | 'asset' | 'bank';
 
+export type ResolveSignedStorageUrlInput = {
+  track: Track;
+  bucket: string;
+  storagePath: string;
+  ttlSeconds: number;
+  forceRefresh: boolean;
+  reason: TrackAudioResolveReason;
+};
+
+export type ResolveSignedStorageUrlResult =
+  | string
+  | {
+      url?: string;
+      expiresAt?: number;
+    }
+  | null;
+
 type CreateTrackAudioUrlResolverOptions = {
   storage: TrackStorageConfig;
   cache: SignedTrackUrlCache;
   resolveAssetUrl: (value: string) => string;
   resolveBankAssetUrls?: (refs: string[]) => Promise<Record<string, string>>;
   onBankAssetsResolved?: (resolved: Record<string, string>) => void;
+  resolveSignedStorageUrl?: (
+    input: ResolveSignedStorageUrlInput
+  ) => Promise<ResolveSignedStorageUrlResult>;
   getPlayerState?: () => PlayerState;
   onResolvedUrl?: (payload: {
     track: Track;
@@ -60,6 +88,8 @@ type CreateTrackAudioUrlResolverOptions = {
     source: ResolvedAudioUrlSource;
     reason: TrackAudioResolveReason;
     storagePath: string;
+    storageBucket: string;
+    resolveMode?: StorageUrlResolveMode;
     fromCache: boolean;
   }) => void;
 };
@@ -172,6 +202,18 @@ const resolveSignedUrlTtl = (value: number | undefined): number => {
   return Math.max(60, Math.floor(numeric));
 };
 
+const buildSupabasePublicObjectUrl = (bucket: string, storagePath: string): string => {
+  const normalizedBase = String(SUPABASE_URL || '').trim().replace(/\/+$/, '');
+  const normalizedBucket = String(bucket || '').trim();
+  const normalizedPath = String(storagePath || '').trim().replace(/^\/+/, '');
+  if (!normalizedBase || !normalizedBucket || !normalizedPath) return '';
+  const encodedPath = normalizedPath
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+  return `${normalizedBase}/storage/v1/object/public/${encodeURIComponent(normalizedBucket)}/${encodedPath}`;
+};
+
 export const DEFAULT_TRACK_STORAGE: TrackStorageConfig = {
   bucket: SUPABASE_STORAGE_BUCKET || DEFAULT_BUCKET,
   isPublic: SUPABASE_BUCKET_PUBLIC === true,
@@ -210,27 +252,36 @@ export const resolveRuntimeTrackAudioUrl = async ({
   track,
   storage,
   cache,
-  forceRefresh = false
+  forceRefresh = false,
+  reason = 'manual',
+  resolveSignedStorageUrl
 }: {
   track: Track;
   storage: TrackStorageConfig;
   cache: SignedTrackUrlCache;
   forceRefresh?: boolean;
-}): Promise<{ url: string; expiresAt: number; storagePath: string }> => {
+  reason?: TrackAudioResolveReason;
+  resolveSignedStorageUrl?: (
+    input: ResolveSignedStorageUrlInput
+  ) => Promise<ResolveSignedStorageUrlResult>;
+}): Promise<{
+  url: string;
+  expiresAt: number;
+  storagePath: string;
+  storageBucket: string;
+  resolveMode: StorageUrlResolveMode;
+}> => {
   const storageTarget = resolveTrackStorageTarget(track);
   const storagePath = storageTarget.storagePath;
   const preferredAudioUrl = getTrackPreferredAudioValue(track);
   if (!storagePath) {
-    return { url: preferredAudioUrl, expiresAt: 0, storagePath: '' };
-  }
-
-  if (
-    !forceRefresh &&
-    preferredAudioUrl &&
-    !preferredAudioUrl.startsWith(ASSET_REF_PREFIX) &&
-    !preferredAudioUrl.toLowerCase().startsWith('bank:')
-  ) {
-    return { url: preferredAudioUrl, expiresAt: Number.MAX_SAFE_INTEGER, storagePath };
+    return {
+      url: preferredAudioUrl,
+      expiresAt: 0,
+      storagePath: '',
+      storageBucket: '',
+      resolveMode: 'signed-client'
+    };
   }
 
   const configuredBucket = String(storage.bucket || DEFAULT_BUCKET).trim() || DEFAULT_BUCKET;
@@ -246,22 +297,90 @@ export const resolveRuntimeTrackAudioUrl = async ({
       cached.storagePath === storagePath &&
       cached.expiresAt > Date.now() + SIGNED_URL_REFRESH_BUFFER_MS
     ) {
-      return cached;
+      return {
+        url: cached.url,
+        expiresAt: cached.expiresAt,
+        storagePath: cached.storagePath,
+        storageBucket: cached.storageBucket || bucket,
+        resolveMode: cached.resolveMode || 'signed-client'
+      };
+    }
+  }
+
+  if (isPublic) {
+    const directPublicUrl = buildSupabasePublicObjectUrl(bucket, storagePath);
+    const publicUrl = String(directPublicUrl || '').trim();
+    if (!publicUrl) {
+      const client = getStorageClient();
+      if (!client) {
+        throw createSupabaseStorageConfigError();
+      }
+      const { data } = client.storage.from(bucket).getPublicUrl(storagePath);
+      const fallbackPublicUrl = String(data?.publicUrl || '').trim();
+      if (!fallbackPublicUrl) {
+        throw new Error('Could not build public audio URL.');
+      }
+      return {
+        url: fallbackPublicUrl,
+        expiresAt: Number.MAX_SAFE_INTEGER,
+        storagePath,
+        storageBucket: bucket,
+        resolveMode: 'public'
+      };
+    }
+    return {
+      url: publicUrl,
+      expiresAt: Number.MAX_SAFE_INTEGER,
+      storagePath,
+      storageBucket: bucket,
+      resolveMode: 'public'
+    };
+  }
+
+  if (resolveSignedStorageUrl) {
+    try {
+      const backendResolved = await resolveSignedStorageUrl({
+        track,
+        bucket,
+        storagePath,
+        ttlSeconds,
+        forceRefresh,
+        reason
+      });
+      const backendUrl = String(
+        typeof backendResolved === 'string'
+          ? backendResolved
+          : backendResolved?.url || ''
+      ).trim();
+      if (backendUrl) {
+        const backendExpiresAt = Number(
+          typeof backendResolved === 'string' ? NaN : backendResolved?.expiresAt
+        );
+        return {
+          url: backendUrl,
+          expiresAt: Number.isFinite(backendExpiresAt) && backendExpiresAt > Date.now()
+            ? backendExpiresAt
+            : Date.now() + ttlSeconds * 1000,
+          storagePath,
+          storageBucket: bucket,
+          resolveMode: 'signed-backend'
+        };
+      }
+    } catch (error) {
+      console.warn('[AUDIO] backend signed URL resolution failed', {
+        trackId: String(track.trackId || '').trim() || null,
+        bucket,
+        storagePath,
+        reason,
+        forceRefresh,
+        error: String((error as { message?: string } | null)?.message || error || 'unknown')
+      });
     }
   }
 
   const client = getStorageClient();
   if (!client) {
     throw createSupabaseStorageConfigError();
-  }
-
-  if (isPublic) {
-    const { data } = client.storage.from(bucket).getPublicUrl(storagePath);
-    const publicUrl = String(data?.publicUrl || '').trim();
-    if (!publicUrl) {
-      throw new Error('Could not build public audio URL.');
-    }
-    return { url: publicUrl, expiresAt: Number.MAX_SAFE_INTEGER, storagePath };
   }
 
   const { data, error } = await client
@@ -275,7 +394,9 @@ export const resolveRuntimeTrackAudioUrl = async ({
   return {
     url: data.signedUrl,
     expiresAt: Date.now() + ttlSeconds * 1000,
-    storagePath
+    storagePath,
+    storageBucket: bucket,
+    resolveMode: 'signed-client'
   };
 };
 
@@ -319,13 +440,17 @@ export const createTrackAudioUrlResolver = ({
   resolveAssetUrl,
   resolveBankAssetUrls,
   onBankAssetsResolved,
+  resolveSignedStorageUrl,
   getPlayerState,
   onResolvedUrl
 }: CreateTrackAudioUrlResolverOptions): TrackAudioUrlResolver => {
   return async (track, options) => {
-    const storagePath = extractTrackStoragePath(track);
+    const storageTarget = resolveTrackStorageTarget(track);
+    const storagePath = storageTarget.storagePath;
+    const configuredBucket = String(storage.bucket || DEFAULT_BUCKET).trim() || DEFAULT_BUCKET;
+    const storageBucket = String(storageTarget.bucket || configuredBucket).trim() || configuredBucket;
     const trackId = String(track.trackId || '').trim();
-    const cacheKey = trackId || storagePath;
+    const cacheKey = trackId || `${storageBucket}/${storagePath}`;
     const reason = options?.reason || 'manual';
     const allowRefreshWhilePlaying = reason === 'stalled' || reason === 'waiting' || reason === 'error';
     const playerState = getPlayerState?.();
@@ -335,13 +460,20 @@ export const createTrackAudioUrlResolver = ({
       playerState.currentTrackId === trackId
     );
 
-    const finish = (url: string, source: ResolvedAudioUrlSource, fromCache = false): string => {
+    const finish = (
+      url: string,
+      source: ResolvedAudioUrlSource,
+      fromCache = false,
+      resolveMode?: StorageUrlResolveMode
+    ): string => {
       onResolvedUrl?.({
         track,
         url,
         source,
         reason,
         storagePath,
+        storageBucket,
+        resolveMode,
         fromCache
       });
       return url;
@@ -360,7 +492,7 @@ export const createTrackAudioUrlResolver = ({
     if (isCurrentTrackPlaying && !allowRefreshWhilePlaying) {
       const cached = cache[cacheKey];
       if (cached?.url) {
-        return finish(cached.url, 'storage', true);
+        return finish(cached.url, 'storage', true, cached.resolveMode);
       }
       const fallback = String(resolveAssetUrl(getTrackPreferredAudioValue(track)) || '').trim();
       if (fallback) {
@@ -373,15 +505,27 @@ export const createTrackAudioUrlResolver = ({
         track,
         storage,
         cache,
-        forceRefresh: Boolean(options?.forceRefresh) && (!isCurrentTrackPlaying || allowRefreshWhilePlaying)
+        forceRefresh: Boolean(options?.forceRefresh) && (!isCurrentTrackPlaying || allowRefreshWhilePlaying),
+        reason,
+        resolveSignedStorageUrl
       });
       cache[cacheKey] = {
         url: resolved.url,
         expiresAt: resolved.expiresAt,
-        storagePath: resolved.storagePath || storagePath
+        storagePath: resolved.storagePath || storagePath,
+        storageBucket: resolved.storageBucket || storageBucket,
+        resolveMode: resolved.resolveMode
       };
-      return finish(resolved.url, 'storage');
+      return finish(resolved.url, 'storage', false, resolved.resolveMode);
     } catch (error) {
+      console.warn('[AUDIO] track audio resolution failed', {
+        trackId: trackId || null,
+        bucket: storageBucket || null,
+        storagePath: storagePath || null,
+        reason,
+        forceRefresh: Boolean(options?.forceRefresh),
+        error: String((error as { message?: string } | null)?.message || error || 'unknown')
+      });
       const fallback = String(resolveAssetUrl(getTrackPreferredAudioValue(track)) || '').trim();
       if (fallback) {
         return finish(fallback, 'asset');

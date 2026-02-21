@@ -723,7 +723,16 @@ const PublicTAPPage: React.FC = () => {
         }
       },
       getPlayerState: () => playerStateRef.current,
-      onResolvedUrl: ({ track: resolvedTrack, url, source, reason, storagePath, fromCache }) => {
+      onResolvedUrl: ({
+        track: resolvedTrack,
+        url,
+        source,
+        reason,
+        storagePath,
+        storageBucket,
+        resolveMode,
+        fromCache
+      }) => {
         if (!isPublicGoLiveRoute) return;
         console.log('[AUDIO][GoLive] resolved-track-url', {
           projectId: project?.projectId || null,
@@ -731,6 +740,8 @@ const PublicTAPPage: React.FC = () => {
           title: resolvedTrack.title,
           reason,
           source,
+          resolveMode: resolveMode || null,
+          storageBucket: storageBucket || null,
           storagePath: storagePath || null,
           fromCache,
           url

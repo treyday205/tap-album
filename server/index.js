@@ -676,6 +676,9 @@ app.post('/api/uploads/presign', async (req, res) => {
     return res.json({
       uploadUrl: data.signedUrl,
       assetRef,
+      storagePath: key,
+      bucket: SUPABASE_BUCKET,
+      bucketPublic: SUPABASE_BUCKET_PUBLIC === true,
       method: 'PUT',
       headers: {
         'x-upsert': 'true',

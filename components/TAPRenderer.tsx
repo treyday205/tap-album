@@ -561,6 +561,8 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     activeTrackRef.current = track;
     const isSwitchingTracks = Boolean(currentTrackId && currentTrackId !== track.trackId);
     const hasStoragePath = Boolean(String(track.audioPath || track.storagePath || '').trim());
+    const resolvedStoragePath = String(track.audioPath || track.storagePath || '').trim();
+    const resolvedStorageBucket = String(track.storageBucket || '').trim();
 
     try {
       if (isSwitchingTracks) {
@@ -589,6 +591,18 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
         throw new Error('Audio URL is missing or invalid.');
       }
 
+      if (resolvedStoragePath) {
+        console.log('[AUDIO] resolved-track-url', {
+          projectId: project.projectId,
+          trackId: track.trackId,
+          storageBucket: resolvedStorageBucket || null,
+          storagePath: resolvedStoragePath,
+          isSwitchingTracks,
+          hasStoragePath,
+          url: playableUrl
+        });
+      }
+
       let probeResult = await probeTrackAudioUrl(playableUrl, track, 'manual');
       if (!isActiveRequest()) return;
 
@@ -599,6 +613,8 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
           context: 'manual',
           status: probeResult.status ?? (probeResult.failureType === 'cors' ? 'CORS' : 'NETWORK'),
           failureType: probeResult.failureType || 'http',
+          storageBucket: resolvedStorageBucket || null,
+          storagePath: resolvedStoragePath || null,
           url: playableUrl,
           error: probeResult.error || probeResult.message
         });
@@ -620,6 +636,8 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
           context: 'refresh',
           status: probeResult.status ?? (probeResult.failureType === 'cors' ? 'CORS' : 'NETWORK'),
           failureType: probeResult.failureType || 'http',
+          storageBucket: resolvedStorageBucket || null,
+          storagePath: resolvedStoragePath || null,
           url: playableUrl,
           error: probeResult.error || probeResult.message
         });
@@ -993,6 +1011,8 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
               console.warn('[AUDIO] audio-element source failed', {
                 projectId: project.projectId,
                 trackId: failingTrack.trackId,
+                storageBucket: String(failingTrack.storageBucket || '').trim() || null,
+                storagePath: String(failingTrack.audioPath || failingTrack.storagePath || '').trim() || null,
                 status: probeResult.status ?? (probeResult.failureType === 'cors' ? 'CORS' : 'NETWORK'),
                 failureType: probeResult.failureType || 'http',
                 url: failingUrl,
