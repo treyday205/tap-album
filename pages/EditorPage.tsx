@@ -27,6 +27,7 @@ import {
   DEFAULT_TRACK_STORAGE,
   type SignedTrackUrlCache
 } from '../services/trackAudio';
+import { SUPABASE_URL } from '../services/supabaseAuth';
 import ResponsiveImage from '../components/ResponsiveImage';
 
 const TracklistTab = lazy(() => import('../components/editor/EditorTracklistTab'));
@@ -34,6 +35,14 @@ const LinksTab = lazy(() => import('../components/editor/EditorLinksTab'));
 const SecurityTab = lazy(() => import('../components/editor/EditorSecurityTab'));
 const DistributionV2 = lazy(() => import('../components/editor/EditorDistributionV2'));
 const DevicePreview = lazy(() => import('../components/editor/EditorDevicePreview'));
+
+const parseOptionalBooleanFlag = (value: unknown): boolean | null => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized === 'true') return true;
+  if (normalized === 'false') return false;
+  return null;
+};
 
 const EditorPage: React.FC = () => {
   const MAX_TRACKS = 24;
@@ -46,6 +55,15 @@ const EditorPage: React.FC = () => {
     SECURITY_V2_OVERRIDE === 'true' ? true : SECURITY_V2_OVERRIDE === 'false' ? false : null;
   const SECURITY_V2_ENABLED =
     SECURITY_V2_OVERRIDE_VALUE ?? SECURITY_V2_ENV;
+  const UPLOAD_PER_TRACK_ENV = parseOptionalBooleanFlag(
+    String(import.meta.env?.VITE_UPLOAD_PER_TRACK || '').trim()
+  );
+  const UPLOAD_PER_TRACK_FALLBACK = import.meta.env.PROD ? true : false;
+  const UPLOAD_PER_TRACK_OVERRIDE =
+    typeof window !== 'undefined' ? localStorage.getItem('UPLOAD_PER_TRACK') : null;
+  const UPLOAD_PER_TRACK_OVERRIDE_VALUE = parseOptionalBooleanFlag(UPLOAD_PER_TRACK_OVERRIDE);
+  const uploadPerTrackEnabled =
+    UPLOAD_PER_TRACK_OVERRIDE_VALUE ?? UPLOAD_PER_TRACK_ENV ?? UPLOAD_PER_TRACK_FALLBACK;
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
   
@@ -116,8 +134,9 @@ const EditorPage: React.FC = () => {
   useEffect(() => {
     if (import.meta.env.DEV) {
       console.log('[DEV] Security tab mode:', SECURITY_V2_ENABLED ? 'V2' : 'V1');
+      console.log('[DEV] Upload per-track mode:', uploadPerTrackEnabled ? 'on' : 'off');
     }
-  }, [SECURITY_V2_ENABLED]);
+  }, [SECURITY_V2_ENABLED, uploadPerTrackEnabled]);
 
   useEffect(() => {
     return () => {
@@ -470,13 +489,30 @@ const EditorPage: React.FC = () => {
       reader.readAsDataURL(file);
     });
 
+  const defaultStorageBucket = String(DEFAULT_TRACK_STORAGE.bucket || '').trim() || 'tap-album';
+
+  const buildCanonicalSupabaseTrackUrl = (
+    storagePath: string | undefined | null,
+    bucket: string | undefined | null
+  ): string => {
+    const normalizedPath = String(storagePath || '').trim().replace(/^\/+/, '');
+    const normalizedBucket = String(bucket || defaultStorageBucket).trim();
+    const normalizedBase = String(SUPABASE_URL || '').trim().replace(/\/+$/, '');
+    if (!normalizedPath || !normalizedBucket || !normalizedBase) return '';
+    const encodedPath = normalizedPath
+      .split('/')
+      .map((segment) => encodeURIComponent(segment))
+      .join('/');
+    return `${normalizedBase}/storage/v1/object/public/${encodeURIComponent(normalizedBucket)}/${encodedPath}`;
+  };
+
   const deriveTrackStorageTarget = (value: string | undefined | null) => {
     const trimmed = String(value || '').trim();
     if (!trimmed) return null;
 
     if (isAssetRef(trimmed)) {
       return {
-        bucket: null as string | null,
+        bucket: defaultStorageBucket,
         storagePath: getAssetKey(trimmed)
       };
     }
@@ -672,16 +708,24 @@ const EditorPage: React.FC = () => {
       }
 
       const targetTrackId = uploadTargetTrackId;
+      const isPerTrackMode = uploadPerTrackEnabled;
       let selectedFiles = files;
-      const maxNewTracks = Math.max(0, MAX_TRACKS - tracks.length);
-      const maxFiles = 1 + maxNewTracks;
-      if (selectedFiles.length > maxFiles) {
-        selectedFiles = selectedFiles.slice(0, maxFiles);
-        alert(`You can upload up to ${maxFiles} files right now (limit ${MAX_TRACKS} tracks).`);
+      if (isPerTrackMode && selectedFiles.length > 1) {
+        selectedFiles = selectedFiles.slice(0, 1);
+        alert('Per-track upload accepts one MP3 at a time.');
+      }
+
+      if (!isPerTrackMode) {
+        const maxNewTracks = Math.max(0, MAX_TRACKS - tracks.length);
+        const maxFiles = 1 + maxNewTracks;
+        if (selectedFiles.length > maxFiles) {
+          selectedFiles = selectedFiles.slice(0, maxFiles);
+          alert(`You can upload up to ${maxFiles} files right now (limit ${MAX_TRACKS} tracks).`);
+        }
       }
 
       const newTracks: Track[] = [];
-      if (selectedFiles.length > 1) {
+      if (!isPerTrackMode && selectedFiles.length > 1) {
         for (let i = 1; i < selectedFiles.length; i++) {
           const file = selectedFiles[i];
           if (!file) continue;
@@ -690,6 +734,8 @@ const EditorPage: React.FC = () => {
             projectId: projectId!,
             title: autoTitle(file.name),
             mp3Url: '',
+            trackUrl: '',
+            storageBucket: '',
             audioUrl: '',
             audioPath: '',
             storagePath: '',
@@ -725,8 +771,22 @@ const EditorPage: React.FC = () => {
             throw new Error('Upload did not return a file URL.');
           }
           const nextStoragePath = storagePathFromTrackValue(assetRef);
+          const nextStorageBucket = defaultStorageBucket;
+          const nextTrackUrl = buildCanonicalSupabaseTrackUrl(nextStoragePath, nextStorageBucket);
+          if (import.meta.env.DEV) {
+            console.log('[DEV] track upload storage target', {
+              projectId,
+              trackId,
+              storagePath: nextStoragePath || null,
+              bucket: nextStorageBucket,
+              trackUrl: nextTrackUrl || null
+            });
+          }
+
           handleUpdateTrack(trackId, {
             mp3Url: assetRef,
+            trackUrl: nextTrackUrl || '',
+            storageBucket: nextStorageBucket,
             storagePath: nextStoragePath,
             audioPath: nextStoragePath,
             audioUrl: '',
@@ -738,7 +798,10 @@ const EditorPage: React.FC = () => {
             const persisted = await Api.saveTrackAudioUrl(
               projectId,
               trackId,
-              { storagePath: nextStoragePath },
+              {
+                storagePath: nextStoragePath,
+                trackUrl: nextTrackUrl || null
+              },
               adminToken
             );
             const persistedTrack = persisted?.track || {};
@@ -754,11 +817,33 @@ const EditorPage: React.FC = () => {
               persistedTrack.storage_path ||
               nextStoragePath
             ).trim();
-            if (persistedAudioUrl) {
+            const persistedTrackUrl = String(
+              persistedTrack.trackUrl ||
+              persistedTrack.track_url ||
+              nextTrackUrl ||
+              ''
+            ).trim();
+            const persistedStorageBucket = String(
+              persistedTrack.storageBucket ||
+              persistedTrack.storage_bucket ||
+              nextStorageBucket
+            ).trim();
+
+            if (uploadPerTrackEnabled) {
+              handleUpdateTrack(trackId, {
+                audioUrl: '',
+                audioPath: persistedAudioPath || nextStoragePath,
+                storagePath: persistedAudioPath || nextStoragePath,
+                storageBucket: persistedStorageBucket || nextStorageBucket,
+                trackUrl: persistedTrackUrl || nextTrackUrl
+              });
+            } else if (persistedAudioUrl) {
               handleUpdateTrack(trackId, {
                 audioUrl: persistedAudioUrl,
                 audioPath: persistedAudioPath || nextStoragePath,
-                storagePath: persistedAudioPath || nextStoragePath
+                storagePath: persistedAudioPath || nextStoragePath,
+                storageBucket: persistedStorageBucket || nextStorageBucket,
+                trackUrl: persistedTrackUrl || nextTrackUrl
               });
             }
           } catch (persistErr) {
@@ -766,12 +851,60 @@ const EditorPage: React.FC = () => {
               console.warn('[DEV] track audio URL auto-save failed', persistErr);
             }
           }
+
+          if (uploadPerTrackEnabled && orderedUploads.length === 1) {
+            const sourceTrack = tracks.find((item) => item.trackId === trackId);
+            const previewTrack: Track = sourceTrack
+              ? {
+                  ...sourceTrack,
+                  mp3Url: assetRef,
+                  trackUrl: nextTrackUrl || sourceTrack.trackUrl || '',
+                  storageBucket: nextStorageBucket,
+                  audioPath: nextStoragePath,
+                  storagePath: nextStoragePath,
+                  audioUrl: ''
+                }
+              : {
+                  trackId,
+                  projectId,
+                  title: autoTitle(file.name),
+                  mp3Url: assetRef,
+                  trackUrl: nextTrackUrl || '',
+                  storageBucket: nextStorageBucket,
+                  audioPath: nextStoragePath,
+                  storagePath: nextStoragePath,
+                  audioUrl: '',
+                  sortOrder: 0,
+                  createdAt: new Date().toISOString()
+                };
+
+            try {
+              const previewUrl = await resolveTrackAudioForPreview(previewTrack, {
+                forceRefresh: true,
+                reason: 'manual'
+              });
+              if (previewUrl && audioPreviewRef.current) {
+                stopPreview();
+                audioPreviewRef.current.src = previewUrl;
+                await audioPreviewRef.current.play();
+                setPreviewingTrackId(trackId);
+                setIsPlayingPreview(true);
+              }
+            } catch (previewErr) {
+              if (import.meta.env.DEV) {
+                console.warn('[DEV] track upload preview failed', previewErr);
+              }
+            }
+          }
+
           setUploadError(null);
         } catch (err: any) {
           try {
             const localRef = await storeLocalAudioAsset(file, { projectId, trackId });
             handleUpdateTrack(trackId, {
               mp3Url: localRef,
+              trackUrl: '',
+              storageBucket: '',
               audioUrl: localRef,
               audioPath: '',
               storagePath: '',
@@ -931,6 +1064,7 @@ const EditorPage: React.FC = () => {
     }
     if (type === 'TRACK_AUDIO') {
       if (trackAudioInputRef.current) {
+        trackAudioInputRef.current.multiple = !uploadPerTrackEnabled;
         trackAudioInputRef.current.value = '';
         trackAudioInputRef.current.click();
       }
@@ -944,6 +1078,8 @@ const EditorPage: React.FC = () => {
       projectId: projectId!,
       title: 'New Track',
       mp3Url: '',
+      trackUrl: '',
+      storageBucket: '',
       audioUrl: '',
       audioPath: '',
       storagePath: '',
@@ -961,17 +1097,52 @@ const EditorPage: React.FC = () => {
     if (previewingTrackId === id) stopPreview();
   };
 
+  const handleRemoveTrackAudio = (id: string) => {
+    const target = tracks.find((track) => track.trackId === id);
+    if (!target) return;
+    const hasAudio = Boolean(
+      String(target.mp3Url || '').trim() ||
+      String(target.audioUrl || '').trim() ||
+      String(target.audioPath || target.storagePath || '').trim()
+    );
+    if (!hasAudio) return;
+    if (!confirm('Remove uploaded MP3 from this track?')) return;
+    if (previewingTrackId === id) {
+      stopPreview();
+    }
+    handleUpdateTrack(id, {
+      mp3Url: '',
+      trackUrl: '',
+      storageBucket: '',
+      audioUrl: '',
+      audioPath: '',
+      storagePath: ''
+    });
+    delete signedTrackAudioUrlsRef.current[id];
+    showToast('Track MP3 removed');
+  };
+
   const handleUpdateTrack = (id: string, updates: Partial<Track>) => {
     const normalizedUpdates: Partial<Track> = { ...updates };
     if (Object.prototype.hasOwnProperty.call(updates, 'mp3Url')) {
       const normalizedMp3 = String(updates.mp3Url || '').trim();
-      const normalizedStoragePath = storagePathFromTrackValue(normalizedMp3) || '';
-      const normalizedTrackUrl = normalizedStoragePath ? '' : normalizedMp3;
+      const storageTarget = deriveTrackStorageTarget(normalizedMp3);
+      const normalizedStoragePath = String(storageTarget?.storagePath || '').trim();
+      const normalizedStorageBucket = normalizedStoragePath
+        ? String(storageTarget?.bucket || defaultStorageBucket).trim()
+        : '';
+      const normalizedTrackUrl = normalizedStoragePath && isAssetRef(normalizedMp3)
+        ? ''
+        : normalizedMp3;
       const hasExplicitAudioPath = Object.prototype.hasOwnProperty.call(updates, 'audioPath');
       const hasExplicitAudioUrl = Object.prototype.hasOwnProperty.call(updates, 'audioUrl');
       const hasExplicitTrackUrl = Object.prototype.hasOwnProperty.call(updates, 'trackUrl');
+      const hasExplicitStorageBucket = Object.prototype.hasOwnProperty.call(updates, 'storageBucket');
 
       normalizedUpdates.storagePath = normalizedStoragePath;
+      normalizedUpdates.storageBucket = hasExplicitStorageBucket
+        ? String(updates.storageBucket || '').trim()
+        : normalizedStorageBucket;
       normalizedUpdates.trackUrl = hasExplicitTrackUrl
         ? String(updates.trackUrl || '').trim()
         : normalizedTrackUrl;
@@ -987,6 +1158,9 @@ const EditorPage: React.FC = () => {
       const normalizedAudioPath = String(updates.audioPath || '').trim();
       normalizedUpdates.audioPath = normalizedAudioPath;
       normalizedUpdates.storagePath = normalizedAudioPath || normalizedUpdates.storagePath || '';
+      if (!normalizedAudioPath) {
+        normalizedUpdates.storageBucket = '';
+      }
     }
 
     const updatedTracks = tracks.map((t, index) => {
@@ -1057,6 +1231,13 @@ const EditorPage: React.FC = () => {
         trackUrl ||
         ''
       ).trim();
+      const persistedStorageBucket = String(
+        payload.storageBucket ||
+        payload.storage_bucket ||
+        track.storageBucket ||
+        parsedStorageFromUrl?.bucket ||
+        defaultStorageBucket
+      ).trim();
 
       if (!audioUrl) {
         throw new Error('Track URL is unavailable.');
@@ -1066,6 +1247,7 @@ const EditorPage: React.FC = () => {
         audioUrl,
         audioPath,
         storagePath: audioPath || '',
+        storageBucket: audioPath ? persistedStorageBucket : '',
         trackUrl: persistedTrackUrl,
         mp3Url: String(track.mp3Url || payload.mp3Url || '').trim()
       });
@@ -1264,7 +1446,7 @@ const EditorPage: React.FC = () => {
       <audio ref={audioPreviewRef} onEnded={stopPreview} className="hidden" />
       <input type="file" ref={projectImageInputRef} className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, 'PROJECT_IMAGE')} />
       <input type="file" ref={trackImageInputRef} className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, 'TRACK_IMAGE')} />
-      <input type="file" ref={trackAudioInputRef} className="hidden" accept=".mp3,audio/mpeg" multiple onChange={(e) => handleFileUpload(e, 'TRACK_AUDIO')} />
+      <input type="file" ref={trackAudioInputRef} className="hidden" accept=".mp3,audio/mpeg" multiple={!uploadPerTrackEnabled} onChange={(e) => handleFileUpload(e, 'TRACK_AUDIO')} />
       {toastMessage && (
         <div className="fixed bottom-6 right-6 z-50 rounded-xl border border-green-400/40 bg-slate-900/95 px-4 py-2 text-[11px] font-black uppercase tracking-[0.2em] text-green-300 shadow-xl">
           {toastMessage}
@@ -1377,6 +1559,7 @@ const EditorPage: React.FC = () => {
                 <TracklistTab
                   project={project}
                   tracks={tracks}
+                  uploadPerTrackEnabled={uploadPerTrackEnabled}
                   uploadingTrackId={uploadingTrackId}
                   uploadProgress={uploadProgress}
                   previewingTrackId={previewingTrackId}
@@ -1392,6 +1575,7 @@ const EditorPage: React.FC = () => {
                   togglePreview={togglePreview}
                   handleDownloadTrack={handleDownloadTrack}
                   handleSaveTrackUrl={handleSaveTrackUrl}
+                  handleRemoveTrackAudio={handleRemoveTrackAudio}
                   handleMagicResolve={handleMagicResolve}
                   handleDeleteTrack={handleDeleteTrack}
                   resolveAsset={resolveAsset}

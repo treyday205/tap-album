@@ -75,6 +75,8 @@ export const applyTrackStorageRecoveries = (
     recoveredCount += 1;
     return {
       ...track,
+      trackUrl: String(track.trackUrl || '').trim() || recovery.trackUrl,
+      storageBucket: recovery.bucket,
       audioPath: recovery.storagePath,
       storagePath: recovery.storagePath
     };

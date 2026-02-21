@@ -124,14 +124,16 @@ const getTrackPreferredAudioValue = (track: Track): string => {
 const resolveTrackStorageTarget = (
   track: Track
 ): { storagePath: string; bucket: string } => {
+  const explicitBucket = String(track.storageBucket || '').trim();
+
   const explicitAudioPath = String(track.audioPath || '').trim();
   if (explicitAudioPath) {
-    return { storagePath: explicitAudioPath, bucket: '' };
+    return { storagePath: explicitAudioPath, bucket: explicitBucket };
   }
 
   const explicitStoragePath = String(track.storagePath || '').trim();
   if (explicitStoragePath) {
-    return { storagePath: explicitStoragePath, bucket: '' };
+    return { storagePath: explicitStoragePath, bucket: explicitBucket };
   }
 
   const rawCandidates = [
@@ -144,7 +146,7 @@ const resolveTrackStorageTarget = (
     if (raw.startsWith(ASSET_REF_PREFIX)) {
       return {
         storagePath: raw.slice(ASSET_REF_PREFIX.length),
-        bucket: ''
+        bucket: explicitBucket
       };
     }
 
@@ -152,12 +154,12 @@ const resolveTrackStorageTarget = (
     if (parsedSupabase?.storagePath) {
       return {
         storagePath: parsedSupabase.storagePath,
-        bucket: parsedSupabase.bucket
+        bucket: parsedSupabase.bucket || explicitBucket
       };
     }
   }
 
-  return { storagePath: '', bucket: '' };
+  return { storagePath: '', bucket: explicitBucket };
 };
 
 export const extractTrackStoragePath = (track: Track): string => {

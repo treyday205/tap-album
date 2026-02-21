@@ -6,6 +6,7 @@ import { isAssetRef } from '../../services/assets';
 type EditorTracklistTabProps = {
   project: Project;
   tracks: Track[];
+  uploadPerTrackEnabled: boolean;
   uploadingTrackId: string | null;
   uploadProgress: Record<string, number>;
   previewingTrackId: string | null;
@@ -21,6 +22,7 @@ type EditorTracklistTabProps = {
   togglePreview: (track: Track) => void;
   handleDownloadTrack: (track: Track) => void;
   handleSaveTrackUrl: (track: Track) => void;
+  handleRemoveTrackAudio: (trackId: string) => void;
   handleMagicResolve: (track: Track) => void;
   handleDeleteTrack: (trackId: string) => void;
   resolveAsset: (value: string) => string;
@@ -29,6 +31,7 @@ type EditorTracklistTabProps = {
 const EditorTracklistTab: React.FC<EditorTracklistTabProps> = ({
   project,
   tracks,
+  uploadPerTrackEnabled,
   uploadingTrackId,
   uploadProgress,
   previewingTrackId,
@@ -44,6 +47,7 @@ const EditorTracklistTab: React.FC<EditorTracklistTabProps> = ({
   togglePreview,
   handleDownloadTrack,
   handleSaveTrackUrl,
+  handleRemoveTrackAudio,
   handleMagicResolve,
   handleDeleteTrack,
   resolveAsset
@@ -81,6 +85,7 @@ const EditorTracklistTab: React.FC<EditorTracklistTabProps> = ({
             : isSecureAudio
               ? 'Secure Audio File'
               : track.mp3Url;
+        const hasTrackUpload = hasStoragePath || isSecureAudio;
         return (
           <div key={track.trackId} className="bg-slate-900/40 p-5 rounded-3xl border border-slate-800/50 flex gap-6 group hover:border-slate-700 transition-all">
             <div onClick={() => triggerFileUpload('TRACK_IMAGE', track.trackId)} className="w-20 h-20 bg-slate-800 rounded-2xl flex-shrink-0 cursor-pointer overflow-hidden border border-slate-700 relative group">
@@ -107,9 +112,11 @@ const EditorTracklistTab: React.FC<EditorTracklistTabProps> = ({
                     placeholder="Audio URL or Spotify Link"
                     className="flex-1 bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-2 text-sm focus:outline-none"
                   />
-                  <button onClick={() => triggerFileUpload('TRACK_AUDIO', track.trackId)} disabled={isUploading} className={`p-2 rounded-xl transition-colors ${isUploading ? 'bg-slate-900 text-slate-600' : 'bg-slate-800 hover:bg-slate-700 text-slate-400'}`}>
-                    {isUploading ? <Loader2 size={18} className="animate-spin" /> : <Upload size={18} />}
-                  </button>
+                  {!uploadPerTrackEnabled && (
+                    <button onClick={() => triggerFileUpload('TRACK_AUDIO', track.trackId)} disabled={isUploading} className={`p-2 rounded-xl transition-colors ${isUploading ? 'bg-slate-900 text-slate-600' : 'bg-slate-800 hover:bg-slate-700 text-slate-400'}`}>
+                      {isUploading ? <Loader2 size={18} className="animate-spin" /> : <Upload size={18} />}
+                    </button>
+                  )}
                 </div>
               </div>
               {isUploading && (
@@ -124,6 +131,27 @@ const EditorTracklistTab: React.FC<EditorTracklistTabProps> = ({
               )}
               <div className="flex items-center justify-between">
                 <div className="flex gap-2">
+                  {uploadPerTrackEnabled && (
+                    <>
+                      <button
+                        onClick={() => triggerFileUpload('TRACK_AUDIO', track.trackId)}
+                        disabled={isUploading}
+                        className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${isUploading ? 'bg-slate-900 text-slate-600' : 'bg-blue-500/10 text-blue-300 hover:bg-blue-500/20'}`}
+                      >
+                        {isUploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
+                        {hasTrackUpload ? 'Replace MP3' : 'Upload MP3'}
+                      </button>
+                      {hasAudioSource && (
+                        <button
+                          onClick={() => handleRemoveTrackAudio(track.trackId)}
+                          disabled={isUploading}
+                          className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </>
+                  )}
                   {hasAudioSource && (
                     <>
                       <button onClick={() => togglePreview(track)} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${previewingTrackId === track.trackId && isPlayingPreview ? 'bg-red-500 text-white' : 'bg-green-500/10 text-green-400 hover:bg-green-500/20'}`}>

@@ -62,6 +62,7 @@ export interface Track {
   title: string;
   mp3Url: string;
   trackUrl?: string;
+  storageBucket?: string;
   audioUrl?: string;
   audioPath?: string;
   storagePath?: string;
