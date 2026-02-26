@@ -146,6 +146,8 @@ const getStorageClient = (): SupabaseClient | null => {
 };
 
 const getTrackPreferredAudioValue = (track: Track): string => {
+  const explicitTrackUrl = String(track.trackUrl || '').trim();
+  if (explicitTrackUrl) return explicitTrackUrl;
   const explicitAudioUrl = String(track.audioUrl || '').trim();
   if (explicitAudioUrl) return explicitAudioUrl;
   return String(track.mp3Url || '').trim();

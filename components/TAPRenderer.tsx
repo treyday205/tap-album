@@ -37,6 +37,22 @@ const formatTime = (value: number): string => {
 
 const STALL_RECOVERY_COOLDOWN_MS = 2500;
 const STALL_RECOVERY_MAX_ATTEMPTS = 3;
+type AudioCorsMode = 'anonymous' | 'none';
+type CorsHeadProbeResult = {
+  ok: boolean;
+  status: number | null;
+  error: string;
+  contentType: string;
+  acceptRanges: string;
+  contentLength: string;
+  contentRange: string;
+  corsSupported: boolean;
+  rangeHeaderPresent: boolean;
+  mode: 'anonymous' | 'none';
+  url: string;
+  origin: string;
+  host: string;
+};
 
 const TAPRenderer: React.FC<TAPRendererProps> = ({
   project,
@@ -72,6 +88,8 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   const lastTimeUpdateLogSecondRef = useRef(-1);
   const playRequestSeqRef = useRef(0);
   const lastOnErrorRebuildSignatureRef = useRef('');
+  const noCorsFallbackOriginsRef = useRef<Record<string, true>>({});
+  const corsHeadDiagnosticsRef = useRef<Record<string, CorsHeadProbeResult>>({});
   const pendingAudioRemountRef = useRef<{
     resolve: (audio: HTMLAudioElement) => void;
     reject: (error: Error) => void;
@@ -93,7 +111,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   };
 
   const getTrackAudioValue = (track: Track) =>
-    String(track.audioUrl || track.mp3Url || '').trim();
+    String(track.trackUrl || track.audioUrl || track.mp3Url || '').trim();
 
   const isAudioAssetRef = (value: string) => {
     const trimmed = String(value || '').trim().toLowerCase();
@@ -132,6 +150,239 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     }
   };
 
+  const getRuntimeUrlInfo = (value: string) => {
+    const raw = String(value || '').trim();
+    const normalized = normalizeRuntimeAudioUrl(raw);
+    const isData = raw.startsWith('data:');
+    const isBlob = raw.startsWith('blob:');
+    let urlObject: URL | null = null;
+    if (!isData && !isBlob && typeof window !== 'undefined') {
+      try {
+        urlObject = new URL(raw, window.location.origin);
+      } catch {
+        urlObject = null;
+      }
+    }
+    const origin = String(urlObject?.origin || '').trim();
+    const host = String(urlObject?.hostname || '').trim().toLowerCase();
+    const protocol = String(urlObject?.protocol || '').trim().toLowerCase();
+    const sameOrigin = Boolean(
+      urlObject &&
+      typeof window !== 'undefined' &&
+      urlObject.origin === window.location.origin
+    );
+    return {
+      raw,
+      normalized,
+      isData,
+      isBlob,
+      urlObject,
+      origin,
+      host,
+      protocol,
+      sameOrigin,
+      isHttp: protocol === 'http:' || protocol === 'https:'
+    };
+  };
+
+  const getConfiguredAnonymousCorsHosts = () =>
+    String(
+      (import.meta as any)?.env?.VITE_AUDIO_CORS_ANONYMOUS_HOSTS ||
+      (import.meta as any)?.env?.VITE_AUDIO_CORS_HOSTS ||
+      ''
+    )
+      .split(',')
+      .map((entry: string) => entry.trim().toLowerCase())
+      .filter(Boolean);
+
+  const isCloudflareWorkerHost = (host: string): boolean => {
+    const normalizedHost = String(host || '').trim().toLowerCase();
+    if (!normalizedHost) return false;
+    if (
+      normalizedHost.endsWith('.workers.dev') ||
+      normalizedHost.endsWith('.cloudflareworkers.com')
+    ) {
+      return true;
+    }
+    const configuredHosts = getConfiguredAnonymousCorsHosts();
+    return configuredHosts.includes(normalizedHost);
+  };
+
+  const shouldDefaultToAnonymousCors = (url: string): boolean => {
+    const info = getRuntimeUrlInfo(url);
+    if (!info.raw || info.isData || info.isBlob) return false;
+    if (info.sameOrigin) return true;
+    return isCloudflareWorkerHost(info.host);
+  };
+
+  const isNoCorsFallbackEnabledForUrl = (url: string): boolean => {
+    const info = getRuntimeUrlInfo(url);
+    if (!info.origin) return false;
+    return Boolean(noCorsFallbackOriginsRef.current[info.origin]);
+  };
+
+  const getAudioCorsModeForUrl = (url: string): AudioCorsMode => {
+    if (isNoCorsFallbackEnabledForUrl(url)) return 'none';
+    return shouldDefaultToAnonymousCors(url) ? 'anonymous' : 'none';
+  };
+
+  const markNoCorsFallbackForUrl = (
+    url: string,
+    track: Track | null,
+    reason: string,
+    details: Record<string, unknown> = {}
+  ) => {
+    const info = getRuntimeUrlInfo(url);
+    if (!info.origin) return;
+    noCorsFallbackOriginsRef.current[info.origin] = true;
+    console.warn('[AUDIO] enabling no-cors playback fallback', {
+      projectId: project.projectId,
+      reason,
+      trackId: track?.trackId || null,
+      url: info.normalized || info.raw || null,
+      origin: info.origin,
+      host: info.host || null,
+      ...details
+    });
+  };
+
+  const applyAudioCrossOriginMode = (
+    audio: HTMLAudioElement,
+    sourceUrl: string,
+    track: Track | null,
+    reason: string
+  ): AudioCorsMode => {
+    const mode = getAudioCorsModeForUrl(sourceUrl);
+    try {
+      if (mode === 'anonymous') {
+        audio.crossOrigin = 'anonymous';
+        audio.setAttribute('crossorigin', 'anonymous');
+      } else {
+        audio.crossOrigin = '';
+        audio.removeAttribute('crossorigin');
+      }
+    } catch {
+      // noop
+    }
+    console.log('[AUDIO]', {
+      event: 'crossorigin-policy',
+      projectId: project.projectId,
+      trackId: track?.trackId || null,
+      mode,
+      reason,
+      url: normalizeRuntimeAudioUrl(sourceUrl) || sourceUrl
+    });
+    return mode;
+  };
+
+  const probeTrackCorsHeadSupport = async (
+    url: string,
+    track: Track,
+    context: 'manual' | 'refresh' | 'audio-error'
+  ): Promise<CorsHeadProbeResult> => {
+    const info = getRuntimeUrlInfo(url);
+    const mode = getAudioCorsModeForUrl(url);
+    const emptyResult: CorsHeadProbeResult = {
+      ok: false,
+      status: null,
+      error: '',
+      contentType: '',
+      acceptRanges: '',
+      contentLength: '',
+      contentRange: '',
+      corsSupported: false,
+      rangeHeaderPresent: false,
+      mode,
+      url: info.normalized || info.raw,
+      origin: info.origin,
+      host: info.host
+    };
+
+    if (!info.raw || info.isData || info.isBlob || !info.isHttp) {
+      return {
+        ...emptyResult,
+        ok: true,
+        corsSupported: true
+      };
+    }
+
+    const cacheKey = `${info.origin || info.host || info.normalized}|${mode}`;
+    const cached = corsHeadDiagnosticsRef.current[cacheKey];
+    if (cached && context !== 'audio-error') {
+      return cached;
+    }
+
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeoutId = typeof window !== 'undefined' && controller
+      ? window.setTimeout(() => controller.abort(), 4500)
+      : null;
+
+    try {
+      const response = await fetch(url, {
+        method: 'HEAD',
+        mode: 'cors',
+        cache: 'no-store',
+        ...(controller ? { signal: controller.signal } : {})
+      });
+
+      const contentType = String(response.headers.get('content-type') || '').trim();
+      const acceptRanges = String(response.headers.get('accept-ranges') || '').trim();
+      const contentLength = String(response.headers.get('content-length') || '').trim();
+      const contentRange = String(response.headers.get('content-range') || '').trim();
+      const result: CorsHeadProbeResult = {
+        ok: response.ok,
+        status: response.status,
+        error: '',
+        contentType,
+        acceptRanges,
+        contentLength,
+        contentRange,
+        corsSupported: true,
+        rangeHeaderPresent: /bytes/i.test(acceptRanges),
+        mode,
+        url: info.normalized || info.raw,
+        origin: info.origin,
+        host: info.host
+      };
+      corsHeadDiagnosticsRef.current[cacheKey] = result;
+      console.log('[AUDIO]', {
+        event: 'cors-head-check',
+        context,
+        projectId: project.projectId,
+        trackId: track.trackId,
+        url: result.url,
+        mode: 'cors',
+        status: response.status,
+        ok: response.ok,
+        contentType: contentType || null,
+        acceptRanges: acceptRanges || null,
+        contentLength: contentLength || null,
+        contentRange: contentRange || null
+      });
+      return result;
+    } catch (error: any) {
+      const message = String(error?.message || error || 'HEAD request failed').trim();
+      const result: CorsHeadProbeResult = {
+        ...emptyResult,
+        error: message
+      };
+      corsHeadDiagnosticsRef.current[cacheKey] = result;
+      console.warn('[AUDIO] cors-head-check failed', {
+        context,
+        projectId: project.projectId,
+        trackId: track.trackId,
+        url: emptyResult.url || url,
+        mode: 'cors',
+        error: message
+      });
+      return result;
+    } finally {
+      if (timeoutId !== null && typeof window !== 'undefined') {
+        window.clearTimeout(timeoutId);
+      }
+    }
+  };
+
   const configureAudioElement = useCallback((audio: HTMLAudioElement | null) => {
     if (!audio) return;
     try {
@@ -140,13 +391,8 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
       // noop
     }
     try {
-      audio.crossOrigin = 'anonymous';
-    } catch {
-      // noop
-    }
-    try {
       audio.setAttribute('preload', 'auto');
-      audio.setAttribute('crossorigin', 'anonymous');
+      audio.removeAttribute('crossorigin');
       audio.setAttribute('type', 'audio/mpeg');
     } catch {
       // noop
@@ -239,6 +485,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
 
     const applySource = (target: HTMLAudioElement) => {
       configureAudioElement(target);
+      applyAudioCrossOriginMode(target, sourceUrl, track, `attach:${reason}`);
       target.removeAttribute('src');
       target.setAttribute('src', sourceUrl);
       target.src = sourceUrl;
@@ -378,7 +625,28 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     failureType: 'http' | 'cors' | 'network' | null;
     message: string;
     error: string;
+    skipped?: boolean;
   }> => {
+    if (isNoCorsFallbackEnabledForUrl(url)) {
+      console.log('[AUDIO]', {
+        event: 'url-health-check-skipped',
+        context,
+        method: 'GET',
+        range: 'bytes=0-0',
+        projectId: project.projectId,
+        trackId: track.trackId,
+        reason: 'no-cors-fallback',
+        url
+      });
+      return {
+        ok: true,
+        status: null,
+        failureType: null,
+        message: '',
+        error: '',
+        skipped: true
+      };
+    }
     try {
       const response = await fetch(url, {
         method: 'GET',
@@ -748,6 +1016,40 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
         throw new Error('Audio URL is missing or invalid.');
       }
 
+      const inspectUrlForCorsCompatibility = async (
+        candidateUrl: string,
+        context: 'manual' | 'refresh'
+      ) => {
+        const info = getRuntimeUrlInfo(candidateUrl);
+        const headResult = await probeTrackCorsHeadSupport(candidateUrl, track, context);
+        if (!isActiveRequest()) return headResult;
+
+        const missingRangeHeader = headResult.ok && !headResult.rangeHeaderPresent;
+        const suspiciousMimeType = headResult.ok && Boolean(headResult.contentType) &&
+          !/^audio\//i.test(headResult.contentType) &&
+          !/octet-stream/i.test(headResult.contentType);
+        const shouldEnableFallback =
+          Boolean(info.origin) &&
+          !info.sameOrigin &&
+          (!headResult.ok || missingRangeHeader || suspiciousMimeType);
+
+        if (shouldEnableFallback) {
+          markNoCorsFallbackForUrl(candidateUrl, track, 'cors-head-incompatible', {
+            context,
+            status: headResult.status,
+            headError: headResult.error || null,
+            acceptRanges: headResult.acceptRanges || null,
+            contentType: headResult.contentType || null
+          });
+          setPlaybackError('Host missing CORS/Range headers');
+        }
+
+        return headResult;
+      };
+
+      await inspectUrlForCorsCompatibility(playableUrl, 'manual');
+      if (!isActiveRequest()) return;
+
       if (resolvedStoragePath) {
         console.log('[AUDIO] resolved-track-url', {
           projectId: project.projectId,
@@ -782,6 +1084,8 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
         if (!isActiveRequest()) return;
         playableUrl = String(refreshed || '').trim() || playableUrl;
         if (isPlayableAudioUrl(playableUrl)) {
+          await inspectUrlForCorsCompatibility(playableUrl, 'refresh');
+          if (!isActiveRequest()) return;
           probeResult = await probeTrackAudioUrl(playableUrl, track, 'refresh');
           if (!isActiveRequest()) return;
         }
@@ -1146,6 +1450,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
         onPlay={(event) => {
           manualPauseRef.current = false;
           clearStallRecoveryTimer();
+          setPlaybackError(null);
           setIsPlaying(true);
           setMediaSession(toMediaSessionTrack(activeTrackRef.current));
           logAudioEvent('play', event.currentTarget, { reason: 'audio-event' });
@@ -1175,6 +1480,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
             projectId: project.projectId,
             trackId: failingTrack?.trackId || null,
             code: code || null,
+            finalCurrentSrc: String(event.currentTarget.currentSrc || '').trim() || null,
             currentSrc: String(event.currentTarget.currentSrc || '').trim() || null,
             src: String(event.currentTarget.src || '').trim() || null,
             attrSrc: String(event.currentTarget.getAttribute('src') || '').trim() || null,
@@ -1186,10 +1492,32 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
             const rebuildSignature = `${failingTrack.trackId}:${normalizeRuntimeAudioUrl(failingUrl)}:${code || 0}`;
             if (lastOnErrorRebuildSignatureRef.current !== rebuildSignature) {
               lastOnErrorRebuildSignatureRef.current = rebuildSignature;
-              void rebuildAudioElement('audio.onerror-no-source', {
-                track: failingTrack,
-                sourceUrl: failingUrl
-              })
+              void probeTrackCorsHeadSupport(failingUrl, failingTrack, 'audio-error')
+                .then((headResult) => {
+                  const info = getRuntimeUrlInfo(failingUrl);
+                  const missingRangeHeader = headResult.ok && !headResult.rangeHeaderPresent;
+                  const suspiciousMimeType = headResult.ok && Boolean(headResult.contentType) &&
+                    !/^audio\//i.test(headResult.contentType) &&
+                    !/octet-stream/i.test(headResult.contentType);
+                  if (
+                    Boolean(info.origin) &&
+                    !info.sameOrigin &&
+                    (!headResult.ok || missingRangeHeader || suspiciousMimeType)
+                  ) {
+                    markNoCorsFallbackForUrl(failingUrl, failingTrack, 'audio-error-cors-head-incompatible', {
+                      status: headResult.status,
+                      headError: headResult.error || null,
+                      acceptRanges: headResult.acceptRanges || null,
+                      contentType: headResult.contentType || null,
+                      code
+                    });
+                    setPlaybackError('Host missing CORS/Range headers');
+                  }
+                  return rebuildAudioElement('audio.onerror-no-source', {
+                    track: failingTrack,
+                    sourceUrl: failingUrl
+                  });
+                })
                 .then((rebuiltAudio) => attachAudioSourceWithFallback(rebuiltAudio, failingUrl, failingTrack, 'error-rebuild'))
                 .then(() => {
                   console.warn('[AUDIO] audio.onerror rebuild fallback attached source', {
@@ -1211,6 +1539,16 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
             }
           }
           if (failingTrack && failingUrl) {
+            void probeTrackCorsHeadSupport(failingUrl, failingTrack, 'audio-error').then((headResult) => {
+              if (headResult.ok) return;
+              console.warn('[AUDIO] audio-element cors HEAD failed', {
+                projectId: project.projectId,
+                trackId: failingTrack.trackId,
+                url: failingUrl,
+                status: headResult.status ?? null,
+                error: headResult.error || 'HEAD failed'
+              });
+            });
             void probeTrackAudioUrl(failingUrl, failingTrack, 'audio-error').then((probeResult) => {
               if (probeResult.ok) return;
               console.warn('[AUDIO] audio-element source failed', {
@@ -1226,7 +1564,11 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
             });
           }
           logAudioEvent('error', event.currentTarget, { reason: 'audio-element-error', code });
-          setPlaybackError(`Playback error (code ${code || 'unknown'})`);
+          if (code === 4 && (isNoCorsFallbackEnabledForUrl(failingUrl) || noSourceLikeError)) {
+            setPlaybackError('Host missing CORS/Range headers');
+          } else {
+            setPlaybackError(`Playback error (code ${code || 'unknown'})`);
+          }
           startStallRecovery('error');
         }}
         onTimeUpdate={(event) => {
@@ -1253,7 +1595,6 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
         playsInline
         autoPlay={false}
         preload="auto"
-        crossOrigin="anonymous"
         className="hidden"
       />
 
