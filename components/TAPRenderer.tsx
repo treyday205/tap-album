@@ -1,5 +1,5 @@
 ﻿
-import React, { useEffect, useState, useRef, memo } from 'react';
+import React, { useCallback, useEffect, useState, useRef, memo } from 'react';
 import { Music2, Instagram, Twitter, Video, Facebook, Play, Pause } from 'lucide-react';
 import { Project, Track, EventType } from '../types';
 import { StorageService } from '../services/storage';
@@ -59,6 +59,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const [audioElementKey, setAudioElementKey] = useState(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const activeTrackRef = useRef<Track | null>(null);
   const isPlayingRef = useRef(false);
@@ -70,6 +71,12 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   const stallRecoveryAttemptsRef = useRef(0);
   const lastTimeUpdateLogSecondRef = useRef(-1);
   const playRequestSeqRef = useRef(0);
+  const lastOnErrorRebuildSignatureRef = useRef('');
+  const pendingAudioRemountRef = useRef<{
+    resolve: (audio: HTMLAudioElement) => void;
+    reject: (error: Error) => void;
+    timeoutId: number;
+  } | null>(null);
 
   const clearStallRecoveryTimer = () => {
     if (typeof window !== 'undefined' && stallRetryTimerRef.current !== null) {
@@ -123,6 +130,153 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     } catch {
       return raw;
     }
+  };
+
+  const configureAudioElement = useCallback((audio: HTMLAudioElement | null) => {
+    if (!audio) return;
+    try {
+      audio.preload = 'auto';
+    } catch {
+      // noop
+    }
+    try {
+      audio.crossOrigin = 'anonymous';
+    } catch {
+      // noop
+    }
+    try {
+      audio.setAttribute('preload', 'auto');
+      audio.setAttribute('crossorigin', 'anonymous');
+      audio.setAttribute('type', 'audio/mpeg');
+    } catch {
+      // noop
+    }
+  }, []);
+
+  const setAudioElementRef = useCallback((node: HTMLAudioElement | null) => {
+    audioRef.current = node;
+    if (!node) return;
+
+    configureAudioElement(node);
+
+    const pending = pendingAudioRemountRef.current;
+    if (!pending) return;
+
+    if (typeof window !== 'undefined') {
+      window.clearTimeout(pending.timeoutId);
+    }
+    pendingAudioRemountRef.current = null;
+    pending.resolve(node);
+  }, [configureAudioElement]);
+
+  const rebuildAudioElement = async (
+    reason: string,
+    { track, sourceUrl }: { track?: Track | null; sourceUrl?: string } = {}
+  ): Promise<HTMLAudioElement> => {
+    if (typeof window === 'undefined') {
+      throw new Error('Audio element rebuild unavailable.');
+    }
+
+    const existingAudio = audioRef.current;
+    if (existingAudio) {
+      try {
+        existingAudio.pause();
+      } catch {
+        // noop
+      }
+      try {
+        existingAudio.removeAttribute('src');
+        existingAudio.load();
+      } catch {
+        // noop
+      }
+    }
+
+    if (pendingAudioRemountRef.current) {
+      window.clearTimeout(pendingAudioRemountRef.current.timeoutId);
+      pendingAudioRemountRef.current.reject(new Error('Audio element rebuild superseded.'));
+      pendingAudioRemountRef.current = null;
+    }
+
+    console.warn('[AUDIO] rebuilding-audio-element', {
+      projectId: project.projectId,
+      reason,
+      trackId: track?.trackId || null,
+      sourceUrl: String(sourceUrl || '').trim() || null
+    });
+
+    return await new Promise<HTMLAudioElement>((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        if (pendingAudioRemountRef.current?.timeoutId === timeoutId) {
+          pendingAudioRemountRef.current = null;
+        }
+        reject(new Error('Audio element rebuild timed out.'));
+      }, 1200);
+
+      pendingAudioRemountRef.current = { resolve, reject, timeoutId };
+      setAudioElementKey((prev) => prev + 1);
+    });
+  };
+
+  const attachAudioSourceWithFallback = async (
+    audio: HTMLAudioElement,
+    sourceUrl: string,
+    track: Track,
+    reason: 'toggle-play' | 'recovery-refresh' | 'error-rebuild'
+  ): Promise<HTMLAudioElement> => {
+    const normalizedTargetUrl = normalizeRuntimeAudioUrl(sourceUrl);
+
+    const sourceIsAttached = (target: HTMLAudioElement) => {
+      const attrSrc = String(target.getAttribute('src') || '').trim();
+      const propSrc = String(target.src || '').trim();
+      const currentSrc = String(target.currentSrc || '').trim();
+      const matches = [attrSrc, propSrc, currentSrc]
+        .map((value) => normalizeRuntimeAudioUrl(value))
+        .filter(Boolean)
+        .includes(normalizedTargetUrl);
+      return { matches, attrSrc, propSrc, currentSrc };
+    };
+
+    const applySource = (target: HTMLAudioElement) => {
+      configureAudioElement(target);
+      target.removeAttribute('src');
+      target.setAttribute('src', sourceUrl);
+      target.src = sourceUrl;
+      target.load();
+    };
+
+    applySource(audio);
+    let attachedState = sourceIsAttached(audio);
+    if (attachedState.matches) return audio;
+
+    console.warn('[AUDIO] audio-source-attach-failed', {
+      projectId: project.projectId,
+      reason,
+      trackId: track.trackId,
+      targetUrl: sourceUrl,
+      attrSrc: attachedState.attrSrc || null,
+      propSrc: attachedState.propSrc || null,
+      currentSrc: attachedState.currentSrc || null
+    });
+
+    const rebuiltAudio = await rebuildAudioElement('attach-failed', { track, sourceUrl });
+    applySource(rebuiltAudio);
+    attachedState = sourceIsAttached(rebuiltAudio);
+
+    if (!attachedState.matches) {
+      console.error('[AUDIO] audio-source-attach-failed-after-rebuild', {
+        projectId: project.projectId,
+        reason,
+        trackId: track.trackId,
+        targetUrl: sourceUrl,
+        attrSrc: attachedState.attrSrc || null,
+        propSrc: attachedState.propSrc || null,
+        currentSrc: attachedState.currentSrc || null
+      });
+      throw new Error('Audio source failed to attach to player element.');
+    }
+
+    return rebuiltAudio;
   };
 
   const isBenignSwitchPlaybackError = (value: unknown): boolean => {
@@ -293,7 +447,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   const attemptStallRecovery = async (triggerEvent: 'stalled' | 'waiting' | 'error') => {
     if (isRecovering.current) return;
 
-    const audio = audioRef.current;
+    let audio = audioRef.current;
     const track = activeTrackRef.current;
     if (!audio || !track) {
       clearStallRecoveryTimer();
@@ -399,10 +553,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
 
       const resumeTime = Number.isFinite(audio.currentTime) ? Math.max(0, audio.currentTime) : 0;
       audio.pause();
-      audio.removeAttribute('src');
-      audio.load();
-      audio.src = refreshedUrl;
-      audio.load();
+      audio = await attachAudioSourceWithFallback(audio, refreshedUrl, track, 'recovery-refresh');
       if (resumeTime > 0) {
         const restoreTime = () => {
           try {
@@ -511,6 +662,11 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
       clearStallRecoveryTimer();
       activeTrackRef.current = null;
       manualPauseRef.current = false;
+      if (pendingAudioRemountRef.current && typeof window !== 'undefined') {
+        window.clearTimeout(pendingAudioRemountRef.current.timeoutId);
+        pendingAudioRemountRef.current.reject(new Error('Audio player unmounted.'));
+        pendingAudioRemountRef.current = null;
+      }
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current.removeAttribute('src');
@@ -539,11 +695,12 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   const handleTogglePlay = async (track: Track) => {
     if (!audioRef.current) return;
 
-    const audio = audioRef.current;
+    let audio = audioRef.current;
     const requestSeq = playRequestSeqRef.current + 1;
     playRequestSeqRef.current = requestSeq;
     const isActiveRequest = () => playRequestSeqRef.current === requestSeq;
     setPlaybackError(null);
+    lastOnErrorRebuildSignatureRef.current = '';
 
     const currentTrackId = currentlyPlayingTrackIdRef.current;
     const sameTrack = currentTrackId === track.trackId;
@@ -654,8 +811,12 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
         clearStallRecoveryTimer();
         await resetAudioElementForSwitch(audio, { clearSource: true });
         if (!isActiveRequest()) return;
-        audio.src = playableUrl;
-        audio.load();
+        if (!audioRef.current) {
+          throw new Error('Audio player is unavailable.');
+        }
+        audio = await attachAudioSourceWithFallback(audioRef.current, playableUrl, track, 'toggle-play');
+        if (!isActiveRequest()) return;
+        lastOnErrorRebuildSignatureRef.current = '';
         setCurrentTime(0);
         setDuration(0);
       }
@@ -970,7 +1131,8 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   return (
     <div className={`${isPreview ? 'w-full h-full bg-slate-950 overflow-y-auto scrollbar-hide text-slate-100 flex flex-col' : 'relative w-full tap-full-height bg-slate-950 text-slate-100 flex flex-col'}`}>
       <audio
-        ref={audioRef}
+        key={audioElementKey}
+        ref={setAudioElementRef}
         onEnded={(event) => {
           clearStallRecoveryTimer();
           activeTrackRef.current = null;
@@ -1005,6 +1167,49 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
           const code = event.currentTarget.error?.code || 0;
           const failingTrack = activeTrackRef.current;
           const failingUrl = String(event.currentTarget.currentSrc || event.currentTarget.src || '').trim();
+          const noSourceLikeError = code === 4 || (
+            typeof HTMLMediaElement !== 'undefined' &&
+            event.currentTarget.networkState === HTMLMediaElement.NETWORK_NO_SOURCE
+          );
+          console.error('[AUDIO] audio.onerror', {
+            projectId: project.projectId,
+            trackId: failingTrack?.trackId || null,
+            code: code || null,
+            currentSrc: String(event.currentTarget.currentSrc || '').trim() || null,
+            src: String(event.currentTarget.src || '').trim() || null,
+            attrSrc: String(event.currentTarget.getAttribute('src') || '').trim() || null,
+            readyState: event.currentTarget.readyState,
+            networkState: event.currentTarget.networkState,
+            paused: event.currentTarget.paused
+          });
+          if (failingTrack && failingUrl && noSourceLikeError) {
+            const rebuildSignature = `${failingTrack.trackId}:${normalizeRuntimeAudioUrl(failingUrl)}:${code || 0}`;
+            if (lastOnErrorRebuildSignatureRef.current !== rebuildSignature) {
+              lastOnErrorRebuildSignatureRef.current = rebuildSignature;
+              void rebuildAudioElement('audio.onerror-no-source', {
+                track: failingTrack,
+                sourceUrl: failingUrl
+              })
+                .then((rebuiltAudio) => attachAudioSourceWithFallback(rebuiltAudio, failingUrl, failingTrack, 'error-rebuild'))
+                .then(() => {
+                  console.warn('[AUDIO] audio.onerror rebuild fallback attached source', {
+                    projectId: project.projectId,
+                    trackId: failingTrack.trackId,
+                    code,
+                    url: failingUrl
+                  });
+                })
+                .catch((fallbackError: any) => {
+                  console.error('[AUDIO] audio.onerror rebuild fallback failed', {
+                    projectId: project.projectId,
+                    trackId: failingTrack.trackId,
+                    code,
+                    url: failingUrl,
+                    error: String(fallbackError?.message || fallbackError || 'fallback failed')
+                  });
+                });
+            }
+          }
           if (failingTrack && failingUrl) {
             void probeTrackAudioUrl(failingUrl, failingTrack, 'audio-error').then((probeResult) => {
               if (probeResult.ok) return;
@@ -1046,6 +1251,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
           logAudioEvent('durationchange', event.currentTarget);
         }}
         playsInline
+        autoPlay={false}
         preload="auto"
         crossOrigin="anonymous"
         className="hidden"
