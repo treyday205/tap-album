@@ -1,6 +1,6 @@
 ﻿
 import React, { useCallback, useContext, useEffect, useMemo, useState, useRef, memo } from 'react';
-import { Music2, Instagram, Twitter, Video, Facebook, Play, Pause } from 'lucide-react';
+import { Music2, Instagram, Twitter, Video, Facebook, Play, Pause, SkipBack, SkipForward, ChevronLeft } from 'lucide-react';
 import { Project, Track, EventType } from '../types';
 import { StorageService } from '../services/storage';
 import { toSafeTrackPlaybackErrorMessage } from '../services/trackAudio';
@@ -95,30 +95,211 @@ const TrackListRows: React.FC<TrackListRowsProps> = ({
   onTrackPress,
   isPreview
 }) => {
-  const { currentTrackId, isPlaying } = useGlobalPlayerStore();
+  const {
+    currentTrackId,
+    isPlaying,
+    currentTime,
+    duration,
+    setCurrentTrack,
+    playCurrentTrack,
+    pauseCurrentTrack,
+    seekTo
+  } = useGlobalPlayerStore();
+  const [uiMode, setUiMode] = useState<'focused' | 'list'>('focused');
+
+  const getTrackAudioUrl = useCallback((track: Track) => {
+    return resolveUrl(String(track.trackUrl || track.audioUrl || track.mp3Url || '').trim());
+  }, [resolveUrl]);
+
+  const activeTrack = currentTrackId
+    ? displayTracks.find((track) => track.trackId === currentTrackId) || null
+    : null;
+  const activeTrackIndex = activeTrack
+    ? displayTracks.findIndex((track) => track.trackId === activeTrack.trackId)
+    : -1;
+  const activeTrackAudioUrl = activeTrack ? getTrackAudioUrl(activeTrack) : '';
+  const canPlayActiveTrack = activeTrack ? canPlayTrack(activeTrack, activeTrackAudioUrl) : false;
+  const shouldShowFocusedTrack = Boolean(
+    !isPreview &&
+    uiMode === 'focused' &&
+    activeTrack &&
+    (currentTrackId !== null || isPlaying)
+  );
+
+  const getNextPlayableTrack = (offset: -1 | 1): Track | null => {
+    if (activeTrackIndex < 0) return null;
+    let index = activeTrackIndex + offset;
+    while (index >= 0 && index < displayTracks.length) {
+      const candidate = displayTracks[index];
+      const candidateAudio = getTrackAudioUrl(candidate);
+      if (canPlayTrack(candidate, candidateAudio)) {
+        return candidate;
+      }
+      index += offset;
+    }
+    return null;
+  };
+
+  const previousTrack = getNextPlayableTrack(-1);
+  const nextTrack = getNextPlayableTrack(1);
+  const progressMax = duration > 0 ? duration : 1;
+  const progressValue = Math.min(progressMax, Math.max(0, currentTime));
+  const isActiveTrackPlaying = Boolean(isPlaying && activeTrack && currentTrackId === activeTrack.trackId);
+  const focusArtworkUrl = activeTrack ? (resolveUrl(activeTrack.artworkUrl || '') || coverSrc) : '';
+
+  const handleRowTrackPress = (track: Track) => {
+    setUiMode('focused');
+    onTrackPress(track);
+  };
+
+  const handleSelectTrack = (track: Track | null) => {
+    if (!track) return;
+    setCurrentTrack(track);
+    void playCurrentTrack();
+  };
 
   return (
-    <>
-      {displayTracks.map((track, index) => {
-        const audioUrl = resolveUrl(String(track.trackUrl || track.audioUrl || track.mp3Url || '').trim());
-        const isActiveTrack = currentTrackId === track.trackId;
-        return (
-          <TrackRow
-            key={track.trackId}
-            track={track}
-            artworkUrl={resolveUrl(track.artworkUrl || '') || coverSrc}
-            subtext={projectArtistName || ''}
-            trackNumber={index + 1}
-            audioUrl={audioUrl}
-            canPlay={canPlayTrack(track, audioUrl)}
-            isPlaying={Boolean(isPlaying && isActiveTrack)}
-            isActive={isActiveTrack}
-            onTogglePlay={onTrackPress}
-            isPreview={isPreview}
-          />
-        );
-      })}
-    </>
+    <div className="relative">
+      <div
+        className={`transition-all duration-300 ease-out ${shouldShowFocusedTrack ? 'opacity-100 translate-y-0' : 'pointer-events-none opacity-0 -translate-y-2 h-0 overflow-hidden'}`}
+      >
+        {activeTrack && (
+          <div className="rounded-[2.2rem] border border-white/10 bg-slate-900/70 p-4 sm:p-6 shadow-[0_34px_70px_rgba(0,0,0,0.45)]">
+            <div className="flex items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={() => setUiMode('list')}
+                className="inline-flex items-center gap-2 rounded-full border border-slate-700/80 bg-slate-900/70 px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.22em] text-slate-300 transition-colors hover:border-slate-500 hover:text-white active:scale-95 touch-manipulation"
+              >
+                <ChevronLeft size={14} />
+                Back to tracks
+              </button>
+              <span className="text-[10px] uppercase tracking-[0.3em] font-black text-green-400">Focused Player</span>
+            </div>
+
+            <div className="mt-5 text-center">
+              <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-white">{activeTrack.title}</h2>
+              {projectArtistName ? (
+                <p className="mt-2 text-[10px] font-black uppercase tracking-[0.34em] text-slate-400">{projectArtistName}</p>
+              ) : null}
+            </div>
+
+            <div className="relative mx-auto mt-6 w-[min(78vw,360px)]">
+              <div className="absolute inset-0 rounded-full bg-green-400/10 blur-2xl" />
+              <div
+                className="relative aspect-square rounded-full border border-slate-600/70 bg-[radial-gradient(circle_at_30%_30%,#475569_0%,#0f172a_42%,#020617_100%)] animate-[spin_16s_linear_infinite] shadow-[inset_0_0_0_2px_rgba(255,255,255,0.08),0_24px_50px_rgba(0,0,0,0.5)]"
+                style={{ animationPlayState: isPlaying ? 'running' : 'paused' }}
+              >
+                <div className="absolute inset-[8%] overflow-hidden rounded-full border border-white/20">
+                  {focusArtworkUrl ? (
+                    <img
+                      src={focusArtworkUrl}
+                      alt={`${activeTrack.title} artwork`}
+                      className="h-full w-full object-cover"
+                      loading="eager"
+                      decoding="async"
+                    />
+                  ) : (
+                    <div className="h-full w-full bg-slate-800" />
+                  )}
+                </div>
+                <div className="absolute inset-[44%] rounded-full border border-slate-600/70 bg-slate-900/95" />
+                <div className="absolute inset-[48.5%] rounded-full bg-slate-200/90" />
+              </div>
+            </div>
+
+            <div className="mt-6 flex items-center gap-2">
+              <span className="w-10 text-[10px] text-slate-500 font-bold tabular-nums">{formatTime(currentTime)}</span>
+              <input
+                type="range"
+                min={0}
+                max={progressMax}
+                step={1}
+                value={progressValue}
+                onChange={(event) => {
+                  const next = Number(event.target.value);
+                  if (!Number.isFinite(next)) return;
+                  seekTo(next);
+                }}
+                className="tap-progress w-full"
+                aria-label="Focused player progress"
+              />
+              <span className="w-10 text-right text-[10px] text-slate-500 font-bold tabular-nums">{formatTime(duration)}</span>
+            </div>
+
+            <div className="mt-5 flex items-center justify-center gap-3">
+              <button
+                type="button"
+                onClick={() => handleSelectTrack(previousTrack)}
+                disabled={!previousTrack}
+                className={`w-12 h-12 rounded-full flex items-center justify-center transition-all touch-manipulation ${
+                  previousTrack ? 'bg-slate-800 text-slate-100 active:scale-95' : 'bg-slate-800/60 text-slate-600 cursor-not-allowed'
+                }`}
+                aria-label="Previous track"
+              >
+                <SkipBack size={18} fill="currentColor" />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!canPlayActiveTrack) return;
+                  if (isActiveTrackPlaying) {
+                    pauseCurrentTrack();
+                    return;
+                  }
+                  handleSelectTrack(activeTrack);
+                }}
+                disabled={!canPlayActiveTrack}
+                className={`h-14 min-w-[152px] rounded-full px-6 text-sm font-black uppercase tracking-[0.18em] flex items-center justify-center gap-2 transition-all touch-manipulation ${
+                  canPlayActiveTrack
+                    ? 'bg-green-500 text-black active:scale-95 shadow-xl shadow-green-500/25'
+                    : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                }`}
+                aria-label={isActiveTrackPlaying ? 'Pause track' : 'Play track'}
+              >
+                {isActiveTrackPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
+                {isActiveTrackPlaying ? 'Pause' : 'Play'}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSelectTrack(nextTrack)}
+                disabled={!nextTrack}
+                className={`w-12 h-12 rounded-full flex items-center justify-center transition-all touch-manipulation ${
+                  nextTrack ? 'bg-slate-800 text-slate-100 active:scale-95' : 'bg-slate-800/60 text-slate-600 cursor-not-allowed'
+                }`}
+                aria-label="Next track"
+              >
+                <SkipForward size={18} fill="currentColor" />
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div
+        className={`transition-all duration-300 ease-out ${shouldShowFocusedTrack ? 'pointer-events-none opacity-0 translate-y-2 h-0 overflow-hidden' : 'opacity-100 translate-y-0'}`}
+      >
+        {displayTracks.map((track, index) => {
+          const audioUrl = getTrackAudioUrl(track);
+          const isActiveTrack = currentTrackId === track.trackId;
+          return (
+            <TrackRow
+              key={track.trackId}
+              track={track}
+              artworkUrl={resolveUrl(track.artworkUrl || '') || coverSrc}
+              subtext={projectArtistName || ''}
+              trackNumber={index + 1}
+              audioUrl={audioUrl}
+              canPlay={canPlayTrack(track, audioUrl)}
+              isPlaying={Boolean(isPlaying && isActiveTrack)}
+              isActive={isActiveTrack}
+              onTogglePlay={handleRowTrackPress}
+              isPreview={isPreview}
+            />
+          );
+        })}
+      </div>
+    </div>
   );
 };
 
@@ -126,8 +307,6 @@ type GlobalNowPlayingBarProps = {
   isPreview: boolean;
   audioElementKey: number;
   setAudioElementRef: (node: HTMLAudioElement | null) => void;
-  nowPlayingTrack: Track | null;
-  nowPlayingArtwork: string;
   onAudioEnded: React.ReactEventHandler<HTMLAudioElement>;
   onAudioPlay: React.ReactEventHandler<HTMLAudioElement>;
   onAudioPause: React.ReactEventHandler<HTMLAudioElement>;
@@ -143,8 +322,6 @@ const GlobalNowPlayingBar: React.FC<GlobalNowPlayingBarProps> = ({
   isPreview,
   audioElementKey,
   setAudioElementRef,
-  nowPlayingTrack,
-  nowPlayingArtwork,
   onAudioEnded,
   onAudioPlay,
   onAudioPause,
@@ -155,102 +332,28 @@ const GlobalNowPlayingBar: React.FC<GlobalNowPlayingBarProps> = ({
   onAudioLoadedMetadata,
   onAudioDurationChange
 }) => {
-  const {
-    currentTrackId,
-    isPlaying,
-    currentTime,
-    duration,
-    setCurrentTrack,
-    playCurrentTrack,
-    pauseCurrentTrack,
-    seekTo
-  } = useGlobalPlayerStore();
-
   if (isPreview) {
     return null;
   }
 
-  const progressMax = duration > 0 ? duration : 1;
-  const progressValue = Math.min(progressMax, Math.max(0, currentTime));
-  const isActiveTrackPlaying = Boolean(
-    nowPlayingTrack &&
-    currentTrackId === nowPlayingTrack.trackId &&
-    isPlaying
-  );
-
   return (
-    <>
-      <audio
-        key={audioElementKey}
-        ref={setAudioElementRef}
-        onEnded={onAudioEnded}
-        onPlay={onAudioPlay}
-        onPause={onAudioPause}
-        onStalled={onAudioStalled}
-        onWaiting={onAudioWaiting}
-        onError={onAudioError}
-        onTimeUpdate={onAudioTimeUpdate}
-        onLoadedMetadata={onAudioLoadedMetadata}
-        onDurationChange={onAudioDurationChange}
-        playsInline
-        autoPlay={false}
-        preload="auto"
-        className="hidden"
-      />
-
-      {nowPlayingTrack && (
-        <div className="pointer-events-none fixed inset-x-0 bottom-0 z-30 px-3 pb-[calc(env(safe-area-inset-bottom)+0.65rem)]">
-          <div className="pointer-events-auto mx-auto w-full max-w-[520px] rounded-[1.7rem] border border-white/10 bg-slate-900/90 backdrop-blur-2xl shadow-[0_-20px_60px_rgba(0,0,0,0.65)] p-3">
-            <div className="flex items-center gap-3">
-              <div className="w-12 h-12 rounded-xl overflow-hidden border border-slate-700/80 bg-slate-800 flex-shrink-0">
-                {nowPlayingArtwork ? (
-                  <img src={nowPlayingArtwork} alt={nowPlayingTrack.title} className="w-full h-full object-cover" loading="eager" decoding="async" />
-                ) : (
-                  <div className="w-full h-full bg-slate-800" />
-                )}
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-[10px] uppercase tracking-[0.24em] font-black text-slate-500">Now Playing</p>
-                <p className="text-sm font-black text-white truncate">{nowPlayingTrack.title}</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  if (isActiveTrackPlaying) {
-                    pauseCurrentTrack();
-                    return;
-                  }
-                  setCurrentTrack(nowPlayingTrack);
-                  void playCurrentTrack();
-                }}
-                className="w-12 h-12 rounded-full bg-green-500 text-black flex items-center justify-center active:scale-95 touch-manipulation shadow-lg shadow-green-500/20"
-                aria-label={isActiveTrackPlaying ? 'Pause track' : 'Play track'}
-              >
-                {isActiveTrackPlaying ? <Pause size={20} fill="currentColor" /> : <Play size={20} className="ml-0.5" fill="currentColor" />}
-              </button>
-            </div>
-            <div className="mt-2 flex items-center gap-2">
-              <span className="w-9 text-[10px] text-slate-500 font-bold tabular-nums">{formatTime(currentTime)}</span>
-              <input
-                type="range"
-                min={0}
-                max={progressMax}
-                step={1}
-                value={progressValue}
-                onChange={(event) => {
-                  const next = Number(event.target.value);
-                  if (!Number.isFinite(next)) return;
-                  seekTo(next);
-                }}
-                className="tap-progress w-full"
-                aria-label="Track progress"
-              />
-              <span className="w-9 text-right text-[10px] text-slate-500 font-bold tabular-nums">{formatTime(duration)}</span>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
+    <audio
+      key={audioElementKey}
+      ref={setAudioElementRef}
+      onEnded={onAudioEnded}
+      onPlay={onAudioPlay}
+      onPause={onAudioPause}
+      onStalled={onAudioStalled}
+      onWaiting={onAudioWaiting}
+      onError={onAudioError}
+      onTimeUpdate={onAudioTimeUpdate}
+      onLoadedMetadata={onAudioLoadedMetadata}
+      onDurationChange={onAudioDurationChange}
+      playsInline
+      autoPlay={false}
+      preload="auto"
+      className="hidden"
+    />
   );
 };
 
@@ -1609,13 +1712,6 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   const resolvedCover = resolveUrl(project.coverImageUrl || '');
   const coverSrc = resolvedCover || '';
 
-  const nowPlayingTrack = currentlyPlayingTrackId
-    ? displayTracks.find((track) => track.trackId === currentlyPlayingTrackId) || tracks.find((track) => track.trackId === currentlyPlayingTrackId) || null
-    : null;
-  const nowPlayingArtwork = nowPlayingTrack
-    ? (resolveUrl(nowPlayingTrack.artworkUrl || '') || coverSrc)
-    : coverSrc;
-
   const playerStore = useMemo<GlobalPlayerStore>(() => ({
     currentTrackId: currentlyPlayingTrackId,
     isPlaying,
@@ -1831,8 +1927,6 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
           isPreview={isPreview}
           audioElementKey={audioElementKey}
           setAudioElementRef={setAudioElementRef}
-          nowPlayingTrack={nowPlayingTrack}
-          nowPlayingArtwork={nowPlayingArtwork}
           onAudioEnded={(event) => {
             clearStallRecoveryTimer();
             activeTrackRef.current = null;
