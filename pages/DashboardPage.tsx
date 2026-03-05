@@ -218,7 +218,12 @@ const DashboardPage: React.FC = () => {
     return null;
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await Api.adminLogout();
+    } catch {
+      // best-effort logout even if network request fails
+    }
     localStorage.removeItem('tap_is_admin');
     localStorage.removeItem('tap_admin_token');
     navigate('/control-admin');

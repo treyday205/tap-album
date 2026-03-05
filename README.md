@@ -16,8 +16,9 @@ View your app in AI Studio: https://ai.studio/apps/drive/1i92dDHEBcqxwnJiWQNRS5q
 1. Install dependencies:
    `npm install`
 2. Configure environment:
-   - Frontend: set `GEMINI_API_KEY` and `VITE_API_URL` in `.env.local`
+   - Frontend: set `GEMINI_API_KEY` in `.env.local`
    - Backend: copy `.env.example` to `.env` and set `DATABASE_URL` and `APP_URL`
+   - Admin auth cookie domain: set `ADMIN_COOKIE_DOMAIN` (`auto` uses `.tapalbum.com` on tapalbum hosts, host-only elsewhere)
    - Supabase Auth (magic link only): set `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`
    - R2 storage (required for album files): set `S3_BUCKET`, `S3_ENDPOINT`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_REGION`, `S3_FORCE_PATH_STYLE`, `S3_KEY_PREFIX`, and `S3_SIGNED_URL_TTL`
    - Optional fallback email sender: set `RESEND_API_KEY` and `RESEND_FROM` (used by legacy `/api/auth/request-magic` path)

@@ -716,6 +716,16 @@ export const Api = {
     request('/api/admin/login', {
       method: 'POST',
       body: JSON.stringify({ password })
+    }),
+
+  getAdminSession: () =>
+    request('/api/admin/session', {
+      method: 'GET'
+    }),
+
+  adminLogout: () =>
+    request('/api/admin/logout', {
+      method: 'POST'
     })
 };
 

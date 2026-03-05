@@ -21,9 +21,15 @@ const PUBLIC_SITE_ENABLED =
 const PUBLIC_ALBUM_ENABLED =
   String(import.meta.env?.VITE_PUBLIC_ALBUM_ENABLED || 'true').toLowerCase() === 'true';
 
+const hasAdminSessionCookie = () => {
+  if (typeof document === 'undefined') return false;
+  return /(?:^|;\s*)tap_admin_session=/.test(String(document.cookie || ''));
+};
+
 const isAdminSession = () =>
   Boolean(localStorage.getItem('tap_admin_token')) ||
-  localStorage.getItem('tap_is_admin') === 'true';
+  localStorage.getItem('tap_is_admin') === 'true' ||
+  hasAdminSessionCookie();
 
 const isStandalonePwa = () => {
   if (typeof window === 'undefined') return false;

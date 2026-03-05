@@ -38,6 +38,9 @@ const normalizeOwnerUserId = (value, fallback = null) => {
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '200038';
 const ADMIN_OWNER_USER_ID = normalizeOwnerUserId(process.env.ADMIN_OWNER_USER_ID, 'u1');
+const ADMIN_SESSION_COOKIE = String(process.env.ADMIN_SESSION_COOKIE || 'tap_admin_session').trim() || 'tap_admin_session';
+const ADMIN_SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const ADMIN_COOKIE_DOMAIN_CONFIG = String(process.env.ADMIN_COOKIE_DOMAIN || 'auto').trim();
 const UPLOAD_DEBUG = process.env.UPLOAD_DEBUG === 'true';
 const DEBUG_TOKEN = String(process.env.DEBUG_TOKEN || '').trim();
 const DEBUG_ENDPOINT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -964,15 +967,103 @@ const issueVerifiedAccessToken = async (projectId, email) => {
   };
 };
 
-const getTokenPayload = (req) => {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+const parseCookieHeader = (cookieHeader) => {
+  const raw = String(cookieHeader || '').trim();
+  if (!raw) return {};
+  return raw
+    .split(';')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .reduce((acc, part) => {
+      const [name, ...valueParts] = part.split('=');
+      if (!name) return acc;
+      const value = valueParts.join('=');
+      try {
+        acc[name] = decodeURIComponent(value || '');
+      } catch {
+        acc[name] = value || '';
+      }
+      return acc;
+    }, {});
+};
+
+const getCookieValue = (req, name) => {
+  const parsed = parseCookieHeader(req?.headers?.cookie);
+  return String(parsed?.[name] || '').trim() || null;
+};
+
+const normalizeCookieDomainValue = (value) => {
+  const normalized = String(value || '').trim().toLowerCase().replace(/^\./, '');
+  if (!normalized) return '';
+  return `.${normalized}`;
+};
+
+const resolveAdminSessionCookieDomain = (req) => {
+  const configured = String(ADMIN_COOKIE_DOMAIN_CONFIG || '').trim().toLowerCase();
+  if (configured && configured !== 'auto') {
+    if (configured === 'host' || configured === 'host-only' || configured === 'none') {
+      return '';
+    }
+    return normalizeCookieDomainValue(configured);
+  }
+
+  const requestHost = String(req?.hostname || req?.headers?.host || '')
+    .trim()
+    .toLowerCase()
+    .split(':')[0];
+  if (requestHost === 'tapalbum.com' || requestHost.endsWith('.tapalbum.com')) {
+    return '.tapalbum.com';
+  }
+  return '';
+};
+
+const getAdminSessionCookieOptions = (req) => {
+  const domain = resolveAdminSessionCookieDomain(req);
+  const options = {
+    secure: !IS_DEV,
+    sameSite: 'lax',
+    path: '/',
+    maxAge: ADMIN_SESSION_MAX_AGE_MS
+  };
+  if (domain) {
+    options.domain = domain;
+  }
+  return options;
+};
+
+const clearAdminSessionCookie = (res, req) => {
+  const domain = resolveAdminSessionCookieDomain(req);
+  const baseOptions = {
+    secure: !IS_DEV,
+    sameSite: 'lax',
+    path: '/'
+  };
+  if (domain) {
+    res.clearCookie(ADMIN_SESSION_COOKIE, { ...baseOptions, domain });
+  }
+  // Clear host-only variant as well.
+  res.clearCookie(ADMIN_SESSION_COOKIE, baseOptions);
+};
+
+const verifyJwtToken = (token) => {
   if (!token) return null;
   try {
     return jwt.verify(token, JWT_SECRET);
   } catch {
     return null;
   }
+};
+
+const getTokenPayload = (req, options = {}) => {
+  const { allowAdminCookie = false } = options || {};
+  const header = req.headers.authorization || '';
+  const bearerToken = header.startsWith('Bearer ') ? header.slice(7) : null;
+  const bearerPayload = verifyJwtToken(bearerToken);
+  if (bearerPayload) return bearerPayload;
+
+  if (!allowAdminCookie) return null;
+  const adminCookieToken = getCookieValue(req, ADMIN_SESSION_COOKIE);
+  return verifyJwtToken(adminCookieToken);
 };
 
 const auth = (req, res, next) => {
@@ -990,11 +1081,11 @@ const getTokenEmail = (req) => {
 };
 
 const isAdminRequest = (req) => {
-  const payload = getTokenPayload(req);
+  const payload = getTokenPayload(req, { allowAdminCookie: true });
   return payload?.role === 'admin';
 };
 const getAdminOwnerScope = (req) => {
-  const payload = getTokenPayload(req);
+  const payload = getTokenPayload(req, { allowAdminCookie: true });
   if (!payload || payload.role !== 'admin') {
     return null;
   }
@@ -1471,7 +1562,25 @@ app.post('/api/admin/login', (req, res) => {
     JWT_SECRET,
     { expiresIn: '30d' }
   );
+  res.cookie(ADMIN_SESSION_COOKIE, token, getAdminSessionCookieOptions(req));
   return res.json({ success: true, token });
+});
+
+app.get('/api/admin/session', (req, res) => {
+  const payload = getTokenPayload(req, { allowAdminCookie: true });
+  if (!payload || payload.role !== 'admin') {
+    return res.status(401).json({ message: 'Not authenticated.' });
+  }
+  return res.json({
+    success: true,
+    role: payload.role,
+    ownerUserId: normalizeOwnerUserId(payload.ownerUserId, ADMIN_OWNER_USER_ID)
+  });
+});
+
+app.post('/api/admin/logout', (req, res) => {
+  clearAdminSessionCookie(res, req);
+  return res.json({ success: true });
 });
 
 app.post('/api/auth/supabase/exchange', async (req, res) => {
