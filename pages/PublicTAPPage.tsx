@@ -37,7 +37,6 @@ const scopedAuthTokenKey = (projectId: string) => `${AUTH_TOKEN_KEY}_${projectId
 const scopedAuthEmailKey = (projectId: string) => `${AUTH_EMAIL_KEY}_${projectId}`;
 const normalizeProjectId = (value?: string | null) => String(value || '').trim();
 const PUBLIC_CACHE_PREFIX = 'tap_public_cache_';
-const LAST_PUBLIC_SLUG_KEY = 'tap_last_public_slug';
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -99,7 +98,6 @@ const PublicTAPPage: React.FC = () => {
   const [cachedPublicProject, setCachedPublicProject] = useState<{
     title: string;
     artistName: string;
-    coverImageUrl: string;
     slug?: string;
   } | null>(null);
   const [recoveryToastMessage, setRecoveryToastMessage] = useState<string | null>(null);
@@ -470,38 +468,70 @@ const PublicTAPPage: React.FC = () => {
 
       try {
         const response = await Api.getProjectBySlug(slug);
-        setProject(response.project);
-        setTracks(response.tracks || []);
+        const rawProject = response?.project || null;
+        const normalizedProject = rawProject
+          ? {
+              ...rawProject,
+              coverImageUrl: String(rawProject.coverUrl || rawProject.coverImageUrl || '').trim()
+            }
+          : null;
+        const normalizedTracks = Array.isArray(response?.tracks)
+          ? response.tracks.map((track: any) => {
+              const signedAudioUrl = String(track?.audioUrl || track?.trackUrl || track?.mp3Url || '').trim();
+              return {
+                ...track,
+                audioUrl: signedAudioUrl,
+                audio_url: signedAudioUrl,
+                trackUrl: signedAudioUrl || String(track?.trackUrl || '').trim(),
+                mp3Url: signedAudioUrl || String(track?.mp3Url || '').trim()
+              };
+            })
+          : [];
+
+        setProject(normalizedProject);
+        setTracks(normalizedTracks);
         setTrackStorage(normalizeTrackStorageConfig(response?.trackStorage));
         if (initial) {
           signedTrackAudioUrlsRef.current = {};
         }
-        if (typeof window !== 'undefined' && response?.project?.slug) {
-          const cacheKey = `${PUBLIC_CACHE_PREFIX}${response.project.slug}`;
+        if (typeof window !== 'undefined' && normalizedProject?.slug) {
+          const cacheKey = `${PUBLIC_CACHE_PREFIX}${normalizedProject.slug}`;
           const cachePayload = {
-            slug: response.project.slug,
-            title: response.project.title,
-            artistName: response.project.artistName,
-            coverImageUrl: response.project.coverImageUrl || ''
+            slug: normalizedProject.slug,
+            title: normalizedProject.title,
+            artistName: normalizedProject.artistName
           };
           try {
             localStorage.setItem(cacheKey, JSON.stringify(cachePayload));
-            localStorage.setItem(LAST_PUBLIC_SLUG_KEY, response.project.slug);
             setCachedPublicProject(cachePayload);
           } catch {
             // ignore cache write errors
           }
         }
-        if (initial && response?.project?.projectId && viewLoggedRef.current !== response.project.projectId) {
-          viewLoggedRef.current = response.project.projectId;
-          StorageService.logEvent(response.project.projectId, EventType.VIEW, 'Page Load');
+        if (normalizedProject?.coverKey && !normalizedProject.coverImageUrl) {
+          console.error('[GOLIVE_COVER_MISSING_FROM_DB]', {
+            slug: normalizedProject.slug,
+            projectId: normalizedProject.projectId,
+            coverKey: normalizedProject.coverKey
+          });
+        }
+        if ((Number(normalizedProject?.trackCount || 0) > 0) && normalizedTracks.length === 0) {
+          console.error('[GOLIVE_NO_TRACKS_FROM_DB]', {
+            slug: normalizedProject?.slug || slug,
+            projectId: normalizedProject?.projectId || null,
+            trackCount: normalizedProject?.trackCount || null
+          });
+        }
+        if (initial && normalizedProject?.projectId && viewLoggedRef.current !== normalizedProject.projectId) {
+          viewLoggedRef.current = normalizedProject.projectId;
+          StorageService.logEvent(normalizedProject.projectId, EventType.VIEW, 'Page Load');
         }
         if (IS_DEV) {
           console.log('[DEBUG] project refresh (api)', {
             reason,
-            projectId: response.project.projectId,
-            slug: response.project.slug,
-            tracks: response.tracks?.length || 0
+            projectId: normalizedProject?.projectId || null,
+            slug: normalizedProject?.slug || slug,
+            tracks: normalizedTracks.length
           });
         }
       } catch (err) {
@@ -711,6 +741,51 @@ const PublicTAPPage: React.FC = () => {
 
   const resolveAsset = useCallback((value: string) => resolveAssetUrl(value, assetUrls), [assetUrls]);
 
+  const refreshSignedTrackUrl = useCallback(
+    async ({ track, storagePath }: { track: Track; storagePath: string }) => {
+      const projectId = String(project?.projectId || '').trim();
+      const key = String(storagePath || '').trim();
+      if (!projectId || !key) return null;
+      const explicitRef = String(track.mp3Url || '').trim();
+      const assetRef = isAssetRef(explicitRef) ? explicitRef : `asset:${key}`;
+      const token = getAuthToken(projectId);
+      if (!token && (project?.emailGateEnabled ?? true)) {
+        return null;
+      }
+
+      try {
+        const response = await Api.signAssets(projectId, [assetRef], token || undefined);
+        const signedUrl = String(response?.assets?.[0]?.url || '').trim();
+        if (!signedUrl) return null;
+        const ttlMs = Math.max(60, Math.floor(Number(trackStorage?.signedUrlTtl || 900))) * 1000;
+        const expiresAt = Date.now() + ttlMs;
+        setTracks((prev) =>
+          prev.map((item) =>
+            item.trackId === track.trackId
+              ? {
+                  ...item,
+                  audioUrl: signedUrl,
+                  audio_url: signedUrl,
+                  trackUrl: signedUrl,
+                  audioUrlExpiresAt: expiresAt
+                }
+              : item
+          )
+        );
+        return { url: signedUrl, expiresAt };
+      } catch (error) {
+        console.error('[AUDIO][GoLive] signed URL refresh failed', {
+          projectId,
+          trackId: track.trackId,
+          storagePath: key,
+          error: String((error as any)?.message || error || 'unknown')
+        });
+        return null;
+      }
+    },
+    [project?.projectId, project?.emailGateEnabled, trackStorage?.signedUrlTtl]
+  );
+
   const resolveTrackAudioForPlayback = useCallback(
     createTrackAudioUrlResolver({
       storage: trackStorage,
@@ -722,6 +797,8 @@ const PublicTAPPage: React.FC = () => {
           setAssetUrls((prev) => ({ ...prev, ...resolved }));
         }
       },
+      resolveSignedStorageUrl: async ({ track, storagePath }) =>
+        refreshSignedTrackUrl({ track, storagePath }),
       getPlayerState: () => playerStateRef.current,
       onResolvedUrl: ({
         track: resolvedTrack,
@@ -746,9 +823,23 @@ const PublicTAPPage: React.FC = () => {
           fromCache,
           url
         });
+        if (source === 'storage' && url) {
+          setTracks((prev) =>
+            prev.map((item) =>
+              item.trackId === resolvedTrack.trackId
+                ? {
+                    ...item,
+                    audioUrl: url,
+                    audio_url: url,
+                    trackUrl: url
+                  }
+                : item
+            )
+          );
+        }
       }
     }),
-    [isPublicGoLiveRoute, project?.projectId, resolveAsset, trackStorage]
+    [isPublicGoLiveRoute, project?.projectId, refreshSignedTrackUrl, resolveAsset, trackStorage]
   );
 
   useEffect(() => {
@@ -1296,18 +1387,10 @@ const PublicTAPPage: React.FC = () => {
   );
 
   const OfflineScreen = () => {
-    const coverUrl = cachedPublicProject?.coverImageUrl || '';
-    const safeCover = coverUrl && !String(coverUrl).startsWith('asset:') ? coverUrl : '';
     return (
       <div className="flex flex-col items-center justify-center tap-full-height bg-slate-950 px-6 text-center tap-safe-top tap-safe-bottom">
         <div className="w-full max-w-md rounded-[2rem] border border-slate-800/70 bg-slate-900/35 shadow-[0_24px_60px_rgba(0,0,0,0.5)] px-6 py-8">
-          <div className="w-32 h-32 mx-auto rounded-[2rem] overflow-hidden border border-slate-800/70 bg-slate-900/60 mb-6">
-            {safeCover ? (
-              <img src={safeCover} alt={cachedPublicProject?.title || 'Album cover'} className="w-full h-full object-cover" />
-            ) : (
-              <div className="w-full h-full bg-slate-900/60" />
-            )}
-          </div>
+          <div className="w-32 h-32 mx-auto rounded-[2rem] border border-slate-800/70 bg-slate-900/60 mb-6" />
           <h1 className="text-2xl font-black text-white">You&#39;re Offline</h1>
           <p className="text-slate-400 text-sm mt-2">Connect to load album content.</p>
           {cachedPublicProject && (

@@ -988,6 +988,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     const hasStoragePath = Boolean(String(track.audioPath || track.storagePath || '').trim());
     const resolvedStoragePath = String(track.audioPath || track.storagePath || '').trim();
     const resolvedStorageBucket = String(track.storageBucket || '').trim();
+    let lastResolvedPlayableUrl = '';
 
     try {
       if (isSwitchingTracks) {
@@ -1011,6 +1012,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
         if (!isActiveRequest()) return;
         playableUrl = String(resolved || '').trim() || fallbackUrl;
       }
+      lastResolvedPlayableUrl = playableUrl;
 
       if (!isPlayableAudioUrl(playableUrl)) {
         throw new Error('Audio URL is missing or invalid.');
@@ -1083,6 +1085,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
         });
         if (!isActiveRequest()) return;
         playableUrl = String(refreshed || '').trim() || playableUrl;
+        lastResolvedPlayableUrl = playableUrl;
         if (isPlayableAudioUrl(playableUrl)) {
           await inspectUrlForCorsCompatibility(playableUrl, 'refresh');
           if (!isActiveRequest()) return;
@@ -1164,12 +1167,21 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
       logAudioEvent('error', audio, {
         reason: 'toggle-play-failed',
         trackId: track.trackId,
-        error: message
+        error: message,
+        resolvedUrl: lastResolvedPlayableUrl || null,
+        currentSrc: String(audio.currentSrc || '').trim() || null,
+        savedTrackUrl: String(track.trackUrl || '').trim() || null
       });
       console.warn('[AUDIO] track playback failed', {
         projectId: project.projectId,
         trackId: track.trackId,
-        error: message
+        error: message,
+        resolvedUrl: lastResolvedPlayableUrl || null,
+        audioCurrentSrc: String(audio.currentSrc || '').trim() || null,
+        audioSrc: String(audio.src || '').trim() || null,
+        savedTrackUrl: String(track.trackUrl || '').trim() || null,
+        savedAudioUrl: String(track.audioUrl || '').trim() || null,
+        savedMp3Url: String(track.mp3Url || '').trim() || null
       });
     }
   };

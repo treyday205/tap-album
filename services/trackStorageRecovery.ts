@@ -1,5 +1,4 @@
 import { Track } from '../types';
-import { parseSupabaseStorageObjectUrl } from './assets';
 
 export type TrackStorageRecovery = {
   trackId: string;
@@ -17,6 +16,16 @@ const getTrackUrlCandidates = (track: Track): string[] => {
   return Array.from(new Set(candidates));
 };
 
+const ASSET_REF_PREFIX = 'asset:';
+
+const isLikelyAssetKey = (value: string): boolean => {
+  const normalized = String(value || '').trim();
+  if (!normalized) return false;
+  if (normalized.includes('..')) return false;
+  if (/^https?:\/\//i.test(normalized)) return false;
+  return /^[a-z0-9/_\-.]+$/i.test(normalized) && normalized.includes('/');
+};
+
 export const deriveTrackStorageRecovery = (track: Track): TrackStorageRecovery | null => {
   const trackId = String(track.trackId || '').trim();
   if (!trackId) return null;
@@ -26,12 +35,16 @@ export const deriveTrackStorageRecovery = (track: Track): TrackStorageRecovery |
 
   const candidates = getTrackUrlCandidates(track);
   for (const trackUrl of candidates) {
-    const parsed = parseSupabaseStorageObjectUrl(trackUrl);
-    if (!parsed?.storagePath) continue;
+    const storagePath = trackUrl.startsWith(ASSET_REF_PREFIX)
+      ? trackUrl.slice(ASSET_REF_PREFIX.length)
+      : isLikelyAssetKey(trackUrl)
+        ? trackUrl
+        : '';
+    if (!storagePath) continue;
     return {
       trackId,
-      bucket: parsed.bucket,
-      storagePath: parsed.storagePath,
+      bucket: String(track.storageBucket || '').trim(),
+      storagePath,
       trackUrl
     };
   }

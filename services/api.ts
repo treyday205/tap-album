@@ -248,10 +248,14 @@ export const Api = {
         : undefined
     }),
 
-  updateProjectCover: (projectId: string, coverImageUrl: string, token?: string) =>
+  updateProjectCover: (
+    projectId: string,
+    payload: { coverKey: string; coverMime?: string | null },
+    token?: string
+  ) =>
     request(`/api/projects/${encodeURIComponent(projectId)}/cover`, {
       method: 'PATCH',
-      body: JSON.stringify({ coverImageUrl }),
+      body: JSON.stringify(payload),
       headers: token
         ? {
             Authorization: `Bearer ${token}`
@@ -281,13 +285,15 @@ export const Api = {
     options: {
       assetKind: 'track-audio' | 'track-artwork' | 'project-cover';
       trackId?: string;
+      trackNumber?: number;
+      title?: string;
       onProgress?: (percent: number) => void;
     }
   ): Promise<{
     assetRef: string;
     storagePath?: string;
     bucket?: string;
-    bucketPublic?: boolean;
+    contentType?: string;
   }> =>
     new Promise(async (resolve, reject) => {
       const isTrackAudio = options.assetKind === 'track-audio';
@@ -299,6 +305,8 @@ export const Api = {
           body: JSON.stringify({
             projectId,
             trackId: options.trackId,
+            trackNumber: options.trackNumber,
+            title: options.title,
             assetKind: options.assetKind,
             contentType,
             fileName: file.name,
@@ -315,19 +323,16 @@ export const Api = {
             ...(presign?.headers || {})
           } as Record<string, string>;
           const storage = presign?.storage || 'unknown';
-          const cacheControl = String(presign?.cacheControl || '3600');
 
           if (!uploadUrl || !assetRef) {
             rejectUpload(new Error('Upload configuration missing.'));
             return;
           }
-
-          if (storage === 'supabase') {
-            headers['Content-Type'] = contentType;
-            if (cacheControl) {
-              headers['cache-control'] = cacheControl;
-            }
-          }
+          const resolvedContentTypeHeader = String(
+            presign?.contentType || headers['content-type'] || contentType
+          );
+          delete headers['content-type'];
+          headers['Content-Type'] = resolvedContentTypeHeader;
 
           reportUploadTelemetry({
             stage: 'presign',
@@ -419,7 +424,7 @@ export const Api = {
           assetRef: String(presign?.assetRef || ''),
           storagePath: String(presign?.storagePath || '').trim() || undefined,
           bucket: String(presign?.bucket || '').trim() || undefined,
-          bucketPublic: typeof presign?.bucketPublic === 'boolean' ? presign.bucketPublic : undefined
+          contentType: String(presign?.contentType || '').trim() || undefined
         });
       } catch (err: any) {
         reject(err);
@@ -430,23 +435,33 @@ export const Api = {
     file: File,
     projectId: string,
     trackId: string,
+    metadata?: { trackNumber?: number; title?: string },
     onProgress?: (percent: number) => void
   ): Promise<{
     assetRef: string;
     storagePath?: string;
     bucket?: string;
-    bucketPublic?: boolean;
+    contentType?: string;
   }> =>
     Api.uploadAsset(file, projectId, {
       assetKind: 'track-audio',
       trackId,
+      trackNumber: metadata?.trackNumber,
+      title: metadata?.title,
       onProgress
     }),
 
   saveTrackAudioUrl: (
     projectId: string,
     trackId: string,
-    payload?: { storagePath?: string | null; trackUrl?: string | null },
+    payload?: {
+      storagePath?: string | null;
+      audioKey?: string | null;
+      trackUrl?: string | null;
+      title?: string | null;
+      trackNumber?: number | null;
+      trackNo?: number | null;
+    },
     token?: string
   ) =>
     request(`/api/projects/${encodeURIComponent(projectId)}/tracks/${encodeURIComponent(trackId)}/audio-url`, {

@@ -9,9 +9,7 @@ import { Resend } from 'resend';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { Transform } from 'stream';
-import { pipeline } from 'stream/promises';
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
@@ -47,7 +45,6 @@ const DEBUG_ENDPOINT_EXPIRES_AT = new Date(
   DEBUG_ENDPOINT_STARTED_AT + DEBUG_ENDPOINT_TTL_MS
 ).toISOString();
 const STATIC_ASSET_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 365;
-const UPLOAD_ASSET_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30;
 const normalizeAppUrl = (value) => {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -103,7 +100,6 @@ const PWA_MANIFEST_VERSION = String(process.env.PWA_MANIFEST_VERSION || '2026.02
 const IS_DEV = process.env.NODE_ENV !== 'production';
 const MAX_AUDIO_BYTES = 1024 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-const UPLOADS_ROOT = path.join(process.cwd(), 'server', 'uploads');
 const S3_BUCKET = process.env.S3_BUCKET;
 const S3_REGION = process.env.S3_REGION || 'auto';
 const S3_ENDPOINT = process.env.S3_ENDPOINT;
@@ -122,23 +118,6 @@ const SUPABASE_ANON_KEY =
   process.env.SUPABASE_PUBLISHABLE_KEY ||
   process.env.VITE_SUPABASE_ANON_KEY ||
   process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
-const SUPABASE_BUCKET = String(process.env.SUPABASE_BUCKET || 'tap-album').trim() || 'tap-album';
-const SUPABASE_URL_HOST = (() => {
-  const raw = String(SUPABASE_URL || '').trim();
-  if (!raw) return '';
-  try {
-    return new URL(raw).hostname.toLowerCase();
-  } catch {
-    return '';
-  }
-})();
-const SUPABASE_SIGNED_URL_TTL = Number(process.env.SUPABASE_SIGNED_URL_TTL || 3600);
-const SUPABASE_TRACK_URL_TTL = Number(process.env.SUPABASE_TRACK_URL_TTL || 3600);
-const MAX_SUPABASE_SIGNED_URL_TTL = 60 * 60 * 24 * 7;
-const SUPABASE_TRACK_PERSISTED_URL_TTL = Number(
-  process.env.SUPABASE_TRACK_PERSISTED_URL_TTL || MAX_SUPABASE_SIGNED_URL_TTL
-);
-const SUPABASE_CACHE_CONTROL = process.env.SUPABASE_CACHE_CONTROL || '3600';
 const SUPABASE_AUTH_SITE_URL = normalizeAppUrl(process.env.SUPABASE_AUTH_SITE_URL || APP_URL);
 const SUPABASE_AUTH_REDIRECT_URLS = String(process.env.SUPABASE_AUTH_REDIRECT_URLS || '')
   .split(',')
@@ -146,14 +125,6 @@ const SUPABASE_AUTH_REDIRECT_URLS = String(process.env.SUPABASE_AUTH_REDIRECT_UR
   .filter(Boolean);
 const AUTO_GENERATED_TITLE = 'New Album';
 const LEGACY_DEFAULT_COVER_URL = 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&q=80&w=800';
-const parseOptionalBoolean = (value) => {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (!normalized) return null;
-  if (normalized === 'true') return true;
-  if (normalized === 'false') return false;
-  return null;
-};
-const SUPABASE_BUCKET_PUBLIC = parseOptionalBoolean(process.env.SUPABASE_BUCKET_PUBLIC);
 const getSupabaseKeyType = (key) => {
   if (!key) return 'missing';
   const trimmed = String(key).trim();
@@ -225,26 +196,21 @@ const hasS3Config = () =>
 const hasSupabaseAdminConfig = () =>
   Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) &&
   SUPABASE_KEY_TYPE !== 'publishable';
-const hasSupabaseConfig = () => hasSupabaseAdminConfig();
 const hasSupabaseAuthClientConfig = () =>
   Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
 
 const getStorageStatus = () => ({
-  supabaseConfigured: hasSupabaseConfig(),
   supabaseAdminConfigured: hasSupabaseAdminConfig(),
   supabaseAuthClientConfigured: hasSupabaseAuthClientConfig(),
   supabaseUrl: SUPABASE_URL || null,
-  supabaseBucket: SUPABASE_BUCKET || null,
-  supabaseBucketPublic: SUPABASE_BUCKET_PUBLIC,
-  supabaseTrackUrlTtl: SUPABASE_TRACK_URL_TTL,
-  supabaseTrackPersistedUrlTtl: SUPABASE_TRACK_PERSISTED_URL_TTL,
   supabaseKeyType: SUPABASE_KEY_TYPE,
   s3Configured: hasS3Config(),
   bucket: S3_BUCKET || null,
   endpoint: S3_ENDPOINT || null,
   region: S3_REGION || null,
   forcePathStyle: S3_FORCE_PATH_STYLE || false,
-  keyPrefix: S3_KEY_PREFIX || 'assets'
+  keyPrefix: S3_KEY_PREFIX || 'assets',
+  signedUrlTtl: Number.isFinite(S3_SIGNED_URL_TTL) ? Math.max(60, Math.floor(S3_SIGNED_URL_TTL)) : 900
 });
 
 const safeSegment = (value) => {
@@ -275,79 +241,48 @@ const isAudioAssetKey = (value) => {
   return AUDIO_EXTENSIONS.has(ext);
 };
 
-const signAssetKey = async (key) => {
-  if (!isSafeAssetKey(key)) return null;
-
-  if (supabase) {
-    const { data, error } = await supabase
-      .storage
-      .from(SUPABASE_BUCKET)
-      .createSignedUrl(key, SUPABASE_SIGNED_URL_TTL);
-    if (error || !data?.signedUrl) {
-      throw error || new Error('Supabase signed URL failed.');
-    }
-    return data.signedUrl;
-  }
-
-  if (s3Client) {
-    const command = new GetObjectCommand({
-      Bucket: S3_BUCKET,
-      Key: key
-    });
-    return getSignedUrl(s3Client, command, {
-      expiresIn: Number.isFinite(S3_SIGNED_URL_TTL) ? S3_SIGNED_URL_TTL : 900
-    });
-  }
-
-  return `/uploads/${key}`;
-};
-
-const normalizeSignedUrlTtl = (value, fallbackSeconds = 3600) => {
-  const numeric = Number(value);
+const resolveSignedUrlTtlSeconds = (value, fallbackSeconds = 900) => {
   const fallback = Number.isFinite(Number(fallbackSeconds))
     ? Math.max(60, Math.floor(Number(fallbackSeconds)))
-    : 3600;
+    : 900;
+  const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
     return fallback;
   }
-  return Math.min(MAX_SUPABASE_SIGNED_URL_TTL, Math.max(60, Math.floor(numeric)));
+  return Math.max(60, Math.floor(numeric));
 };
 
-const resolveTrackPlaybackUrlFromStoragePath = async (
-  storagePath,
-  { longLived = false } = {}
-) => {
+const signAssetKeyWithExpiry = async (key, options = {}) => {
+  if (!isSafeAssetKey(key)) return null;
+  if (!s3Client || !S3_BUCKET) {
+    throw new Error('R2 storage is not configured.');
+  }
+  const ttlSeconds = resolveSignedUrlTtlSeconds(options.ttlSeconds, S3_SIGNED_URL_TTL);
+  const command = new GetObjectCommand({
+    Bucket: S3_BUCKET,
+    Key: key
+  });
+  const url = await getSignedUrl(s3Client, command, {
+    expiresIn: ttlSeconds
+  });
+  return {
+    url,
+    expiresAt: Date.now() + ttlSeconds * 1000
+  };
+};
+
+const signAssetKey = async (key, options = {}) => {
+  const signed = await signAssetKeyWithExpiry(key, options);
+  return signed?.url || null;
+};
+
+const resolveTrackPlaybackUrlFromStoragePath = async (storagePath, options = {}) => {
   const key = String(storagePath || '').trim();
   if (!isSafeAssetKey(key)) {
     throw new Error('Track storage path is invalid.');
   }
-
-  if (supabase) {
-    if (SUPABASE_BUCKET_PUBLIC === true) {
-      const { data } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(key);
-      const publicUrl = String(data?.publicUrl || '').trim();
-      if (!publicUrl) {
-        throw new Error('Supabase public URL is missing.');
-      }
-      return publicUrl;
-    }
-
-    const ttlSeconds = normalizeSignedUrlTtl(
-      longLived ? SUPABASE_TRACK_PERSISTED_URL_TTL : SUPABASE_TRACK_URL_TTL,
-      longLived ? MAX_SUPABASE_SIGNED_URL_TTL : SUPABASE_TRACK_URL_TTL
-    );
-    const { data, error } = await supabase
-      .storage
-      .from(SUPABASE_BUCKET)
-      .createSignedUrl(key, ttlSeconds);
-    if (error || !data?.signedUrl) {
-      throw error || new Error('Supabase signed URL failed.');
-    }
-    return data.signedUrl;
-  }
-
-  const signed = await signAssetKey(key);
-  if (!signed) {
+  const signed = await signAssetKeyWithExpiry(key, options);
+  if (!signed?.url) {
     throw new Error('Track storage URL could not be resolved.');
   }
   return signed;
@@ -414,35 +349,50 @@ const resolveContentType = (contentType, extension) => {
   return EXT_TO_MIME[extension] || 'application/octet-stream';
 };
 
-const buildObjectKey = ({ assetKind, projectId, trackId, extension }) => {
-  const version = crypto.randomUUID();
+const applyS3KeyPrefix = (key) => {
   const prefix = String(S3_KEY_PREFIX || '').trim().replace(/^\/+|\/+$/g, '');
-  const base = prefix ? `${prefix}/` : '';
-
-  if (assetKind === 'track-audio') {
-    const stableTrackId = String(trackId || '').trim() || version;
-    return `albums/${projectId}/tracks/${stableTrackId}.mp3`;
-  }
-  if (assetKind === 'track-artwork') {
-    return `${base}artwork/${projectId}/${trackId}/${version}.${extension}`;
-  }
-  return `${base}covers/${projectId}/${version}.${extension}`;
+  if (!prefix) return String(key || '').replace(/^\/+/, '');
+  return `${prefix}/${String(key || '').replace(/^\/+/, '')}`;
 };
 
-const createSizeLimiter = (limitBytes) => {
-  let total = 0;
-  return new Transform({
-    transform(chunk, _enc, cb) {
-      total += chunk.length;
-      if (total > limitBytes) {
-        const err = new Error('File too large');
-        err.code = 'LIMIT_EXCEEDED';
-        cb(err);
-        return;
-      }
-      cb(null, chunk);
-    }
-  });
+const sanitizeTrackNumber = (value, fallback = 1) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return Math.max(1, Math.floor(Number(fallback) || 1));
+  }
+  return Math.max(1, Math.floor(numeric));
+};
+
+const slugifyObjectSegment = (value, fallback = 'track') => {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/['’]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+  return normalized || fallback;
+};
+
+const buildObjectKey = ({
+  assetKind,
+  projectId,
+  trackId,
+  trackNumber,
+  trackTitle,
+  extension
+}) => {
+  const sanitizedTrackNumber = sanitizeTrackNumber(trackNumber, 1);
+  const trackSlug = slugifyObjectSegment(trackTitle || trackId || `track-${sanitizedTrackNumber}`, 'track');
+  const trackStem = `${sanitizedTrackNumber}-${trackSlug}`;
+
+  if (assetKind === 'track-audio') {
+    return applyS3KeyPrefix(`albums/${projectId}/tracks/${trackStem}.mp3`);
+  }
+  if (assetKind === 'track-artwork') {
+    return applyS3KeyPrefix(`albums/${projectId}/tracks/${trackStem}-artwork.${extension}`);
+  }
+  return applyS3KeyPrefix(`albums/${projectId}/cover.${extension}`);
 };
 
 const s3Client =
@@ -468,16 +418,12 @@ const supabaseAdmin =
         }
       })
     : null;
-const supabase = hasSupabaseConfig() ? supabaseAdmin : null;
 
 if (!s3Client) {
-  console.warn('S3/R2 storage is not configured. Legacy S3 asset signing is disabled.');
+  console.warn('S3/R2 storage is not configured. Upload and signing endpoints are disabled.');
 }
 if (!supabaseAdmin) {
-  console.warn('Supabase admin client is not configured. Supabase Auth exchange and storage signing are disabled.');
-}
-if (!supabase) {
-  console.warn('Supabase storage is not configured. Track uploads are disabled.');
+  console.warn('Supabase admin client is not configured. Supabase Auth exchange is disabled.');
   if (SUPABASE_KEY_TYPE === 'publishable') {
     console.warn('Supabase key appears to be publishable. Use the service role (secret) key on the server.');
   }
@@ -546,11 +492,6 @@ app.use(express.json());
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
 });
-app.use('/uploads', express.static(UPLOADS_ROOT, {
-  fallthrough: false,
-  maxAge: UPLOAD_ASSET_MAX_AGE_MS,
-  immutable: true
-}));
 const resolveRequestOrigin = (req) => {
   const headerOrigin = String(req.headers.origin || '').trim();
   if (headerOrigin) return headerOrigin;
@@ -596,10 +537,23 @@ const getSupabaseAuthDiagnostics = (req) => {
 };
 
 app.post('/api/uploads/presign', async (req, res) => {
-  const { projectId, trackId, contentType, fileName, size, assetKind } = req.body || {};
+  const {
+    projectId,
+    trackId,
+    trackNumber,
+    trackNo,
+    trackTitle,
+    title,
+    contentType,
+    fileName,
+    size,
+    assetKind
+  } = req.body || {};
   const safeProjectId = safeSegment(projectId);
   const normalizedKind = String(assetKind || '').trim();
   const safeTrackId = safeSegment(trackId);
+  const resolvedTrackNumber = sanitizeTrackNumber(trackNumber ?? trackNo, 1);
+  const resolvedTrackTitle = String(trackTitle || title || '').trim();
 
   if (!safeProjectId || !ASSET_KINDS.has(normalizedKind)) {
     return res.status(400).json({ message: 'projectId and valid assetKind are required.' });
@@ -640,11 +594,42 @@ app.post('/api/uploads/presign', async (req, res) => {
     });
   }
 
+  let effectiveTrackNumber = resolvedTrackNumber;
+  let effectiveTrackTitle = resolvedTrackTitle;
+  if (normalizedKind === 'track-audio' && safeTrackId) {
+    try {
+      const trackResult = await query(
+        'SELECT title, track_no, sort_order FROM tracks WHERE project_id = $1 AND track_id = $2 LIMIT 1',
+        [safeProjectId, safeTrackId]
+      );
+      if (trackResult.rows.length > 0) {
+        const row = trackResult.rows[0];
+        if (!resolvedTrackTitle) {
+          effectiveTrackTitle = String(row.title || '').trim();
+        }
+        if (
+          req.body?.trackNumber === undefined &&
+          req.body?.trackNo === undefined
+        ) {
+          effectiveTrackNumber = sanitizeTrackNumber(row.track_no ?? row.sort_order, resolvedTrackNumber);
+        }
+      }
+    } catch (lookupError) {
+      console.warn('[UPLOAD] track metadata lookup failed', {
+        projectId: safeProjectId,
+        trackId: safeTrackId,
+        error: String(lookupError?.message || lookupError || 'unknown')
+      });
+    }
+  }
+
   const resolvedContentType = resolveContentType(normalizedType, extension);
   const key = buildObjectKey({
     assetKind: normalizedKind,
     projectId: safeProjectId,
     trackId: safeTrackId,
+    trackNumber: effectiveTrackNumber,
+    trackTitle: effectiveTrackTitle,
     extension
   });
   const assetRef = createAssetRef(key);
@@ -653,117 +638,48 @@ app.post('/api/uploads/presign', async (req, res) => {
     assetKind: normalizedKind,
     projectId: safeProjectId,
     trackId: safeTrackId || null,
+    trackNumber: normalizedKind === 'track-audio' ? effectiveTrackNumber : null,
+    trackTitle: normalizedKind === 'track-audio' ? effectiveTrackTitle || null : null,
     contentType: resolvedContentType,
     size: declaredSize || null,
     storage: getStorageStatus()
   });
 
-  if (!supabase) {
+  if (!s3Client || !S3_BUCKET) {
     return res.status(503).json({
-      message: 'Supabase storage is required for uploads. Configure SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and SUPABASE_BUCKET.'
+      message: 'R2 storage is required for uploads. Configure S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY.'
     });
   }
 
   try {
-    const { data, error } = await supabase
-      .storage
-      .from(SUPABASE_BUCKET)
-      .createSignedUploadUrl(key, { upsert: true });
-    if (error || !data?.signedUrl) {
-      throw error || new Error('Supabase signed upload failed.');
-    }
-    logUpload('presign success', { key, storage: 'supabase' });
+    const putCommand = new PutObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+      ContentType: resolvedContentType
+    });
+    const uploadUrl = await getSignedUrl(s3Client, putCommand, {
+      expiresIn: resolveSignedUrlTtlSeconds(S3_SIGNED_URL_TTL, 900)
+    });
+    logUpload('presign success', { key, storage: 'r2' });
     return res.json({
-      uploadUrl: data.signedUrl,
+      uploadUrl,
       assetRef,
       storagePath: key,
-      bucket: SUPABASE_BUCKET,
-      bucketPublic: SUPABASE_BUCKET_PUBLIC === true,
+      bucket: S3_BUCKET,
+      contentType: resolvedContentType,
       method: 'PUT',
       headers: {
-        'x-upsert': 'true',
-        'content-type': resolvedContentType,
-        'cache-control': SUPABASE_CACHE_CONTROL
+        'content-type': resolvedContentType
       },
-      cacheControl: SUPABASE_CACHE_CONTROL,
-      storage: 'supabase'
+      storage: 'r2'
     });
   } catch (err) {
-    console.error('Supabase presign upload failed:', err);
+    console.error('R2 presign upload failed:', err);
     logUpload('presign failed', {
       message: err?.message || String(err),
       name: err?.name || null
     });
-    return res.status(502).json({ message: 'Unable to create upload URL in Supabase storage.' });
-  }
-});
-
-app.put('/api/uploads/local', async (req, res) => {
-  const key = String(req.query.key || '').trim();
-  const assetKind = String(req.query.assetKind || '').trim();
-
-  if (!key || !isSafeAssetKey(key) || !ASSET_KINDS.has(assetKind)) {
-    return res.status(400).json({ message: 'Invalid upload target.' });
-  }
-
-  const maxBytes = assetKind === 'track-audio' ? MAX_AUDIO_BYTES : MAX_IMAGE_BYTES;
-  const declaredLength = Number(req.headers['content-length'] || 0);
-  if (declaredLength && declaredLength > maxBytes) {
-    return res.status(413).json({ message: `File too large. Max ${assetKind === 'track-audio' ? '1GB' : '10MB'}.` });
-  }
-
-  const contentType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
-  if (contentType && contentType !== 'application/octet-stream') {
-    if (assetKind === 'track-audio' && !contentType.startsWith('audio/')) {
-      return res.status(400).json({ message: 'Only audio uploads are supported.' });
-    }
-    if (assetKind !== 'track-audio' && !contentType.startsWith('image/')) {
-      return res.status(400).json({ message: 'Only image uploads are supported.' });
-    }
-  }
-
-  const resolvedPath = path.resolve(UPLOADS_ROOT, key);
-  if (!resolvedPath.startsWith(UPLOADS_ROOT)) {
-    return res.status(400).json({ message: 'Invalid upload path.' });
-  }
-
-  logUpload('local upload start', {
-    key,
-    assetKind,
-    contentType,
-    declaredLength: declaredLength || null
-  });
-
-  await fs.promises.mkdir(path.dirname(resolvedPath), { recursive: true });
-  const tempPath = `${resolvedPath}.uploading`;
-
-  try {
-    await pipeline(
-      req,
-      createSizeLimiter(maxBytes),
-      fs.createWriteStream(tempPath)
-    );
-    await fs.promises.rm(resolvedPath, { force: true });
-    await fs.promises.rename(tempPath, resolvedPath);
-    logUpload('local upload complete', { key });
-    return res.json({ success: true });
-  } catch (err) {
-    await fs.promises.rm(tempPath, { force: true });
-    if (err && err.code === 'LIMIT_EXCEEDED') {
-      logUpload('local upload failed', { key, reason: 'LIMIT_EXCEEDED' });
-      return res.status(413).json({ message: `File too large. Max ${assetKind === 'track-audio' ? '1GB' : '10MB'}.` });
-    }
-    if (err && err.code === 'ERR_STREAM_PREMATURE_CLOSE') {
-      logUpload('local upload failed', { key, reason: 'CANCELLED' });
-      return res.status(400).json({ message: 'Upload canceled.' });
-    }
-    console.error('Local upload failed:', err);
-    logUpload('local upload failed', {
-      key,
-      message: err?.message || String(err),
-      name: err?.name || null
-    });
-    return res.status(500).json({ message: 'Upload failed.' });
+    return res.status(502).json({ message: 'Unable to create upload URL in R2 storage.' });
   }
 });
 
@@ -1053,92 +969,29 @@ const isDebugWindowOpen = () =>
   Boolean(DEBUG_TOKEN) &&
   Date.now() <= DEBUG_ENDPOINT_STARTED_AT + DEBUG_ENDPOINT_TTL_MS;
 
-const normalizeCoverPath = (value) => {
+const toAssetKey = (value) => {
   const normalized = String(value || '').trim();
-  return normalized || null;
-};
-const SUPABASE_STORAGE_OBJECT_PATH_REGEX =
-  /^\/storage\/v1\/object\/(?:public|sign|authenticated)\/(.+)$/i;
-const safeDecodeUriComponent = (value) => {
-  try {
-    return decodeURIComponent(String(value || ''));
-  } catch {
-    return String(value || '');
+  if (!normalized) return null;
+  if (isSafeAssetKey(normalized)) {
+    return normalized;
   }
-};
-const parseSupabaseStorageObjectUrl = (value) => {
-  const raw = String(value || '').trim();
-  if (!raw) return null;
-
-  let parsed;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    return null;
-  }
-
-  if (!['http:', 'https:'].includes(parsed.protocol)) {
-    return null;
-  }
-
-  const host = String(parsed.hostname || '').trim().toLowerCase();
-  const isSupabaseHost =
-    host.endsWith('.supabase.co') ||
-    host === 'supabase.co' ||
-    host.endsWith('.supabase.in') ||
-    host === 'supabase.in' ||
-    (SUPABASE_URL_HOST && host === SUPABASE_URL_HOST);
-  if (!isSupabaseHost) {
-    return null;
-  }
-
-  const match = String(parsed.pathname || '').match(SUPABASE_STORAGE_OBJECT_PATH_REGEX);
-  if (!match || !match[1]) return null;
-
-  const decoded = safeDecodeUriComponent(match[1]).replace(/^\/+/, '').trim();
-  if (!decoded || decoded.includes('..')) return null;
-
-  const slashIndex = decoded.indexOf('/');
-  if (slashIndex <= 0 || slashIndex === decoded.length - 1) {
-    return null;
-  }
-
-  const bucket = decoded.slice(0, slashIndex).trim();
-  const storagePath = decoded.slice(slashIndex + 1).replace(/^\/+/, '').trim();
-  if (!bucket || !storagePath || storagePath.includes('..')) {
-    return null;
-  }
-
-  return { bucket, storagePath };
-};
-const normalizeTrackStoragePath = (value, fallback = '') => {
-  const primary = String(value || '').trim();
-  if (primary && isSafeAssetKey(primary)) {
-    return primary;
-  }
-  if (isAssetRef(primary)) {
-    const key = primary.slice(ASSET_REF_PREFIX.length);
+  if (isAssetRef(normalized)) {
+    const key = normalized.slice(ASSET_REF_PREFIX.length);
     if (isSafeAssetKey(key)) {
       return key;
     }
-  }
-  const primarySupabaseUrl = parseSupabaseStorageObjectUrl(primary);
-  if (primarySupabaseUrl && isSafeAssetKey(primarySupabaseUrl.storagePath)) {
-    return primarySupabaseUrl.storagePath;
-  }
-
-  const legacy = String(fallback || '').trim();
-  if (isAssetRef(legacy)) {
-    const key = legacy.slice(ASSET_REF_PREFIX.length);
-    if (isSafeAssetKey(key)) {
-      return key;
-    }
-  }
-  const legacySupabaseUrl = parseSupabaseStorageObjectUrl(legacy);
-  if (legacySupabaseUrl && isSafeAssetKey(legacySupabaseUrl.storagePath)) {
-    return legacySupabaseUrl.storagePath;
   }
   return null;
+};
+const normalizeTrackStoragePath = (value, fallback = '') => {
+  const primary = toAssetKey(value);
+  if (primary) return primary;
+  return toAssetKey(fallback);
+};
+const normalizeCoverKey = (value, fallback = '') => {
+  const primary = toAssetKey(value);
+  if (primary) return primary;
+  return toAssetKey(fallback);
 };
 const normalizeTrackAudioPath = (value, storageFallback = '', mp3Fallback = '') =>
   normalizeTrackStoragePath(value, storageFallback || mp3Fallback || '');
@@ -1157,17 +1010,21 @@ const ownerUserIdFromData = (data) => {
   return normalizeOwnerUserId(projectData.ownerUserId, ADMIN_OWNER_USER_ID);
 };
 
-const getSignedCoverUrlForPath = async (coverPath) => {
-  const normalized = normalizeCoverPath(coverPath);
-  if (!normalized) return null;
-  if (!isAssetRef(normalized)) {
-    return normalized;
+const getSignedCoverUrlForKey = async (coverKey) => {
+  const normalized = normalizeCoverKey(coverKey);
+  if (!normalized) {
+    return { coverKey: null, coverUrl: null, coverUrlExpiresAt: null };
   }
   try {
-    return await signAssetRef(normalized);
+    const signed = await signAssetKeyWithExpiry(normalized);
+    return {
+      coverKey: normalized,
+      coverUrl: signed?.url || null,
+      coverUrlExpiresAt: signed?.expiresAt || null
+    };
   } catch (err) {
     console.error('Cover signing failed:', err?.message || err);
-    return null;
+    return { coverKey: normalized, coverUrl: null, coverUrlExpiresAt: null };
   }
 };
 
@@ -1251,6 +1108,8 @@ const createDefaultProjectPayload = ({ ownerUserId, projectId, slug, title, arti
     title,
     artistName,
     coverImageUrl: '',
+    coverKey: '',
+    coverMime: '',
     published: false,
     emailGateEnabled: true,
     instagramUrl: '',
@@ -1269,17 +1128,20 @@ const buildProjectPayload = async (row, options = {}) => {
   const projectData = row?.data && typeof row.data === 'object' ? row.data : {};
   const limits = getSecurityLimitsFromData(projectData);
   const ownerUserId = ownerUserIdFromData(projectData);
-  const coverPath = normalizeCoverPath(row?.cover_image_url);
+  const coverKey = normalizeCoverKey(row?.cover_key, row?.cover_image_url);
+  const coverMime = String(row?.cover_mime || '').trim() || null;
   const trackCountValue = Number(row?.track_count);
   const trackCount = Number.isFinite(trackCountValue) ? trackCountValue : undefined;
   const pinUnlockCountValue = Number(row?.pin_unlock_count);
   const pinUnlockCount = Number.isFinite(pinUnlockCountValue) ? Math.max(0, pinUnlockCountValue) : 0;
   const pinActiveCountValue = Number(row?.pin_active_count);
   const pinActiveCount = Number.isFinite(pinActiveCountValue) ? Math.max(0, pinActiveCountValue) : 0;
-  const coverSignedUrl = includeSignedCover
-    ? await getSignedCoverUrlForPath(coverPath)
-    : null;
-  const coverSignedUrlReady = Boolean(coverPath && coverSignedUrl);
+  const coverSigned = includeSignedCover
+    ? await getSignedCoverUrlForKey(coverKey)
+    : { coverKey, coverUrl: null, coverUrlExpiresAt: null };
+  const coverSignedUrl = String(coverSigned.coverUrl || '').trim() || null;
+  const coverSignedUrlReady = Boolean(coverSigned.coverKey && coverSignedUrl);
+  const coverRef = coverSigned.coverKey ? createAssetRef(coverSigned.coverKey) : '';
 
   return {
     ...projectData,
@@ -1288,8 +1150,12 @@ const buildProjectPayload = async (row, options = {}) => {
     slug: row.slug,
     title: row.title,
     artistName: row.artist_name,
-    coverImageUrl: coverPath || '',
-    coverPath,
+    coverImageUrl: coverRef,
+    coverPath: coverSigned.coverKey,
+    coverKey: coverSigned.coverKey,
+    coverMime,
+    coverUrl: coverSignedUrl,
+    coverUrlExpiresAt: coverSigned.coverUrlExpiresAt || null,
     coverSignedUrl,
     coverSignedUrlReady,
     trackCount,
@@ -1306,10 +1172,10 @@ const buildProjectPayload = async (row, options = {}) => {
 };
 
 const buildTrackStoragePayload = () => ({
-  provider: 'supabase',
-  bucket: SUPABASE_BUCKET,
-  public: SUPABASE_BUCKET_PUBLIC,
-  signedUrlTtl: Number.isFinite(SUPABASE_TRACK_URL_TTL) ? Math.max(60, Math.floor(SUPABASE_TRACK_URL_TTL)) : 3600
+  provider: 'r2',
+  bucket: S3_BUCKET || null,
+  keyPrefix: String(S3_KEY_PREFIX || '').trim().replace(/^\/+|\/+$/g, '') || null,
+  signedUrlTtl: resolveSignedUrlTtlSeconds(S3_SIGNED_URL_TTL, 900)
 });
 
 app.get('/health', (_req, res) => {
@@ -2564,7 +2430,7 @@ app.get('/api/projects/:projectId/cover-url', async (req, res) => {
 
   try {
     const result = await query(
-      'SELECT project_id, cover_image_url, updated_at, data FROM projects WHERE project_id = $1 LIMIT 1',
+      'SELECT project_id, cover_key, cover_mime, cover_image_url, updated_at, data FROM projects WHERE project_id = $1 LIMIT 1',
       [safeProjectId]
     );
     if (result.rows.length === 0) {
@@ -2575,14 +2441,15 @@ app.get('/api/projects/:projectId/cover-url', async (req, res) => {
     if (rowOwner !== ownerScope) {
       return res.status(404).json({ message: 'Project not found.' });
     }
-    const coverPath = normalizeCoverPath(row.cover_image_url);
-    const coverSignedUrl = await getSignedCoverUrlForPath(coverPath);
-    const coverSignedUrlReady = Boolean(coverPath && coverSignedUrl);
+    const coverKey = normalizeCoverKey(row.cover_key, row.cover_image_url);
+    const coverSigned = await getSignedCoverUrlForKey(coverKey);
+    const coverSignedUrl = String(coverSigned.coverUrl || '').trim() || null;
+    const coverSignedUrlReady = Boolean(coverSigned.coverKey && coverSignedUrl);
     if (!IS_DEV) {
       console.log('[COVER SIGN]', {
         route: 'cover-url',
         projectId: row.project_id,
-        hasCoverPath: Boolean(coverPath),
+        hasCoverPath: Boolean(coverSigned.coverKey),
         coverSignedUrlReady
       });
     }
@@ -2590,7 +2457,11 @@ app.get('/api/projects/:projectId/cover-url', async (req, res) => {
     return res.json({
       success: true,
       projectId: row.project_id,
-      coverPath,
+      coverPath: coverSigned.coverKey,
+      coverKey: coverSigned.coverKey,
+      coverMime: String(row.cover_mime || '').trim() || null,
+      coverUrl: coverSignedUrl,
+      coverUrlExpiresAt: coverSigned.coverUrlExpiresAt || null,
       coverSignedUrl,
       coverSignedUrlReady,
       updatedAt: row.updated_at
@@ -2603,7 +2474,14 @@ app.get('/api/projects/:projectId/cover-url', async (req, res) => {
 
 app.patch('/api/projects/:projectId/cover', async (req, res) => {
   const safeProjectId = safeSegment(req.params.projectId);
-  const coverImageUrl = normalizeCoverPath(req.body?.coverImageUrl);
+  const coverKey = normalizeCoverKey(req.body?.coverKey, req.body?.coverImageUrl);
+  const coverKeyRef = coverKey ? createAssetRef(coverKey) : '';
+  const requestedMime = String(req.body?.coverMime || req.body?.contentType || '').trim().toLowerCase();
+  const extFromKey = path.extname(String(coverKey || '')).replace('.', '').toLowerCase();
+  const fallbackMime = EXT_TO_MIME[extFromKey] || null;
+  const coverMime = requestedMime && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(requestedMime)
+    ? requestedMime
+    : fallbackMime;
   if (!safeProjectId) {
     return res.status(400).json({ message: 'projectId is required.' });
   }
@@ -2634,32 +2512,41 @@ app.patch('/api/projects/:projectId/cover', async (req, res) => {
     const nextData = {
       ...currentData,
       ownerUserId: rowOwner,
-      coverImageUrl: coverImageUrl || ''
+      coverImageUrl: coverKeyRef || '',
+      coverKey: coverKey || '',
+      coverMime: coverMime || ''
     };
 
     const updated = await query(
       `UPDATE projects
-       SET cover_image_url = $2,
-           data = $3,
+       SET cover_key = $2,
+           cover_mime = $3,
+           cover_image_url = $4,
+           data = $5,
            updated_at = NOW()
        WHERE project_id = $1
        RETURNING *`,
-      [safeProjectId, coverImageUrl, nextData]
+      [safeProjectId, coverKey, coverMime, coverKeyRef || null, nextData]
     );
     const project = await buildProjectPayload(updated.rows[0], { includeSignedCover: true });
-    const coverSignedUrlReady = Boolean(project.coverPath && project.coverSignedUrl);
+    const coverSignedUrlReady = Boolean(project.coverKey && project.coverSignedUrl);
+    console.log('ALBUM_COVER_SAVED', safeProjectId, coverKey || null);
     if (!IS_DEV) {
       console.log('[COVER SIGN]', {
         route: 'cover-update',
         projectId: safeProjectId,
-        hasCoverPath: Boolean(project.coverPath),
+        hasCoverPath: Boolean(project.coverKey),
         coverSignedUrlReady
       });
     }
     res.set('Cache-Control', 'no-store');
     return res.json({
       success: true,
-      coverPath: project.coverPath || null,
+      coverPath: project.coverKey || null,
+      coverKey: project.coverKey || null,
+      coverMime: project.coverMime || null,
+      coverUrl: project.coverUrl || null,
+      coverUrlExpiresAt: project.coverUrlExpiresAt || null,
       coverSignedUrl: project.coverSignedUrl || null,
       coverSignedUrlReady,
       project
@@ -2706,6 +2593,23 @@ app.post('/api/projects/:projectId/tracks/:trackId/audio-url', async (req, res) 
       return res.status(404).json({ message: 'Track not found.' });
     }
 
+    const requestedAudioKey = normalizeTrackStoragePath(
+      req.body?.audioKey ??
+      req.body?.audio_key ??
+      req.body?.storagePath ??
+      req.body?.storage_path ??
+      req.body?.audioPath ??
+      req.body?.audio_path,
+      req.body?.mp3Url ??
+      req.body?.mp3_url ??
+      req.body?.trackUrl ??
+      req.body?.track_url
+    );
+    const rowAudioKey = normalizeTrackStoragePath(
+      trackRow.audio_key,
+      trackRow.audio_path || trackRow.storage_path || trackRow.mp3_url
+    );
+    const audioKey = String(requestedAudioKey || rowAudioKey || '').trim();
     const requestedTrackUrl = normalizeTrackAudioUrl(
       req.body?.trackUrl ??
       req.body?.track_url ??
@@ -2715,42 +2619,33 @@ app.post('/api/projects/:projectId/tracks/:trackId/audio-url', async (req, res) 
       req.body?.mp3_url,
       ''
     );
-    const requestStoragePath = normalizeTrackAudioPath(
-      req.body?.storagePath ?? req.body?.storage_path,
-      '',
-      requestedTrackUrl || ''
-    );
-    const rowStoragePath = normalizeTrackAudioPath(
-      trackRow.audio_path,
-      trackRow.storage_path,
-      trackRow.mp3_url
-    );
-    const storagePath = String(requestStoragePath || rowStoragePath || '').trim();
-    const trackUrl = String(
-      requestedTrackUrl || normalizeTrackAudioUrl(trackRow.audio_url, trackRow.mp3_url) || ''
-    ).trim();
+    const externalTrackUrl = audioKey
+      ? ''
+      : String(requestedTrackUrl || normalizeTrackAudioUrl(trackRow.mp3_url, '') || '').trim();
+    const requestedTitle = String(req.body?.title || '').trim();
+    const requestedTrackNoValue = Number(req.body?.trackNumber ?? req.body?.trackNo);
+    const requestedTrackNo = Number.isFinite(requestedTrackNoValue)
+      ? Math.max(1, Math.floor(requestedTrackNoValue))
+      : null;
 
-    if (!storagePath && !trackUrl) {
+    if (!audioKey && !externalTrackUrl) {
       return res.status(400).json({
-        message: 'Track storage path is missing and no external track URL was provided.'
+        message: 'Track audio key is missing and no external track URL was provided.'
       });
     }
-
-    const audioUrl = storagePath
-      ? await resolveTrackPlaybackUrlFromStoragePath(storagePath, {
-          longLived: true
-        })
-      : trackUrl;
 
     const updateResult = await query(
       `
       UPDATE tracks
-      SET storage_path = CASE WHEN NULLIF(BTRIM($3), '') IS NULL THEN NULL ELSE $3 END,
-          audio_path = CASE WHEN NULLIF(BTRIM($3), '') IS NULL THEN NULL ELSE $3 END,
-          audio_url = $4,
+      SET title = COALESCE(NULLIF(BTRIM($3), ''), title),
+          track_no = COALESCE($4, track_no),
+          audio_key = CASE WHEN NULLIF(BTRIM($5), '') IS NULL THEN NULL ELSE $5 END,
+          storage_path = CASE WHEN NULLIF(BTRIM($5), '') IS NULL THEN NULL ELSE $5 END,
+          audio_path = CASE WHEN NULLIF(BTRIM($5), '') IS NULL THEN NULL ELSE $5 END,
+          audio_url = NULL,
           mp3_url = CASE
-            WHEN NULLIF(BTRIM($5), '') IS NOT NULL THEN $5
-            WHEN NULLIF(BTRIM($3), '') IS NULL THEN $4
+            WHEN NULLIF(BTRIM($6), '') IS NOT NULL THEN $6
+            WHEN NULLIF(BTRIM($7), '') IS NOT NULL THEN $7
             ELSE mp3_url
           END,
           updated_at = NOW()
@@ -2758,17 +2653,36 @@ app.post('/api/projects/:projectId/tracks/:trackId/audio-url', async (req, res) 
         AND track_id = $2
       RETURNING *
       `,
-      [safeProjectId, safeTrackId, storagePath, audioUrl, trackUrl]
+      [
+        safeProjectId,
+        safeTrackId,
+        requestedTitle || null,
+        requestedTrackNo,
+        audioKey || null,
+        audioKey ? createAssetRef(audioKey) : null,
+        externalTrackUrl || null
+      ]
     );
     const updated = updateResult.rows[0];
-    const updatedStoragePath = normalizeTrackStoragePath(updated.storage_path, updated.mp3_url) || '';
+    const updatedAudioKey = normalizeTrackStoragePath(
+      updated.audio_key,
+      updated.audio_path || updated.storage_path || updated.mp3_url
+    ) || '';
     const updatedAudioPath =
-      normalizeTrackAudioPath(updated.audio_path, updatedStoragePath, updated.mp3_url) || updatedStoragePath;
-    const updatedAudioUrl = normalizeTrackAudioUrl(updated.audio_url, updated.mp3_url) || audioUrl;
-    const mp3Url = updatedStoragePath
-      ? createAssetRef(updatedStoragePath)
+      normalizeTrackAudioPath(updated.audio_path, updatedAudioKey, updated.mp3_url) || updatedAudioKey;
+    const signedPlayback = updatedAudioKey
+      ? await resolveTrackPlaybackUrlFromStoragePath(updatedAudioKey)
+      : null;
+    const updatedAudioUrl = String(signedPlayback?.url || updated.mp3_url || '').trim();
+    const updatedAudioUrlExpiresAt = signedPlayback?.expiresAt || null;
+    const mp3Url = updatedAudioKey
+      ? createAssetRef(updatedAudioKey)
       : String(updated.mp3_url || '').trim();
-    const persistedTrackUrl = String(updated.mp3_url || '').trim();
+    const persistedTrackUrl = updatedAudioUrl || String(updated.mp3_url || '').trim();
+    const trackNoValue = Number(updated.track_no || updated.sort_order || 0);
+    const safeTrackNo = Number.isFinite(trackNoValue) && trackNoValue > 0
+      ? Math.floor(trackNoValue)
+      : 1;
 
     res.set('Cache-Control', 'no-store');
     return res.json({
@@ -2777,14 +2691,16 @@ app.post('/api/projects/:projectId/tracks/:trackId/audio-url', async (req, res) 
         trackId: updated.track_id,
         projectId: updated.project_id,
         title: updated.title || 'Untitled',
-        trackNo: Number(updated.track_no || 0),
+        trackNo: safeTrackNo,
         sortOrder: Number(updated.sort_order || 0),
-        storagePath: updatedStoragePath,
-        storageBucket: updatedStoragePath ? SUPABASE_BUCKET : '',
+        audioKey: updatedAudioKey || null,
+        storagePath: updatedAudioKey,
+        storageBucket: S3_BUCKET || '',
         audioPath: updatedAudioPath,
         audio_path: updatedAudioPath,
         audioUrl: updatedAudioUrl,
         audio_url: updatedAudioUrl,
+        audioUrlExpiresAt: updatedAudioUrlExpiresAt,
         trackUrl: persistedTrackUrl || '',
         mp3Url: mp3Url || updatedAudioUrl || '',
         artworkUrl: updated.artwork_url || '',
@@ -2793,7 +2709,11 @@ app.post('/api/projects/:projectId/tracks/:trackId/audio-url', async (req, res) 
       }
     });
   } catch (err) {
-    console.error('Track audio URL save failed:', err);
+    console.error('Track audio URL save failed:', {
+      projectId: safeProjectId,
+      trackId: safeTrackId,
+      error: err?.message || err
+    });
     return res.status(500).json({ message: 'Unable to save track audio URL.' });
   }
 });
@@ -2850,7 +2770,17 @@ app.post('/api/projects/sync', async (req, res) => {
 
     const title = payload.title || 'Untitled';
     const artistName = payload.artistName || 'Unknown Artist';
-    const coverImageUrl = payload.coverImageUrl || null;
+    const coverKey = normalizeCoverKey(payload.coverKey, payload.coverImageUrl);
+    const coverImageUrl = coverKey ? createAssetRef(coverKey) : null;
+    const requestedCoverMime = String(payload.coverMime || '').trim().toLowerCase();
+    const coverMimeFromExt = (() => {
+      const ext = path.extname(String(coverKey || '')).replace('.', '').toLowerCase();
+      return EXT_TO_MIME[ext] || null;
+    })();
+    const coverMime =
+      requestedCoverMime && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(requestedCoverMime)
+        ? requestedCoverMime
+        : coverMimeFromExt;
     const published = Boolean(payload.published);
 
     if (resetSecurity) {
@@ -2863,21 +2793,35 @@ app.post('/api/projects/sync', async (req, res) => {
        SET slug = $2,
            title = $3,
            artist_name = $4,
-           cover_image_url = $5,
-           published = $6,
-           data = $7,
-           pin_unlock_count = CASE WHEN $8 THEN 0 ELSE pin_unlock_count END,
-           pin_active_count = CASE WHEN $8 THEN 0 ELSE pin_active_count END,
+           cover_key = $5,
+           cover_mime = $6,
+           cover_image_url = $7,
+           published = $8,
+           data = $9,
+           pin_unlock_count = CASE WHEN $10 THEN 0 ELSE pin_unlock_count END,
+           pin_active_count = CASE WHEN $10 THEN 0 ELSE pin_active_count END,
            updated_at = NOW()
        WHERE project_id = $1
        RETURNING *`,
-      [payload.projectId, normalizedSlug, title, artistName, coverImageUrl, published, payload, resetSecurity]
+      [
+        payload.projectId,
+        normalizedSlug,
+        title,
+        artistName,
+        coverKey || null,
+        coverMime || null,
+        coverImageUrl,
+        published,
+        payload,
+        resetSecurity
+      ]
     );
 
-    if (UPLOAD_DEBUG && coverImageUrl) {
+    if (UPLOAD_DEBUG && coverKey) {
       logUpload('project sync cover', {
         projectId: payload.projectId,
-        coverImageUrl
+        coverKey,
+        coverMime: coverMime || null
       });
     }
 
@@ -2897,33 +2841,26 @@ app.post('/api/projects/sync', async (req, res) => {
       const sortOrder = Number.isFinite(sortOrderValue)
         ? Math.max(0, Math.floor(sortOrderValue))
         : trackNo;
-      const rawAudioPath = track.audioPath ?? track.audio_path ?? track.storagePath;
-      const storagePath = normalizeTrackStoragePath(track.storagePath, track.mp3Url);
-      const audioPath = normalizeTrackAudioPath(rawAudioPath, storagePath, track.mp3Url);
-      const normalizedStoragePath = storagePath || audioPath;
+      const rawAudioPath = track.audioPath ?? track.audio_path ?? track.storagePath ?? track.audioKey;
+      const audioKey = normalizeTrackStoragePath(rawAudioPath, track.mp3Url);
       const rawTrackUrl = String(track.trackUrl || track.mp3Url || '').trim();
-      const normalizedTrackUrl = rawTrackUrl && !isAssetRef(rawTrackUrl) ? rawTrackUrl : '';
-      const legacyMp3Url = normalizedTrackUrl || null;
-      const rawAudioUrl = track.audioUrl ?? track.audio_url;
-      const audioUrl = normalizeTrackAudioUrl(
-        rawAudioUrl,
-        normalizedStoragePath ? '' : legacyMp3Url || ''
-      );
+      const externalTrackUrl = rawTrackUrl && !isAssetRef(rawTrackUrl) ? rawTrackUrl : '';
+      const mp3Url = audioKey ? createAssetRef(audioKey) : externalTrackUrl || null;
 
       await client.query(
-        `INSERT INTO tracks (track_id, project_id, title, mp3_url, artwork_url, sort_order, track_no, storage_path, audio_path, audio_url, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`,
+        `INSERT INTO tracks (track_id, project_id, title, mp3_url, artwork_url, sort_order, track_no, audio_key, storage_path, audio_path, audio_url, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NOW())`,
         [
           trackId,
           payload.projectId,
           track.title || 'Untitled',
-          legacyMp3Url,
+          mp3Url,
           track.artworkUrl || null,
           sortOrder,
           trackNo,
-          normalizedStoragePath,
-          audioPath,
-          audioUrl
+          audioKey,
+          audioKey,
+          audioKey
         ]
       );
     }
@@ -2937,7 +2874,7 @@ app.post('/api/projects/sync', async (req, res) => {
         projectId: payload.projectId,
         slug: normalizedSlug,
         tracks: trackRows.length,
-        coverImageUrl: coverImageUrl || null
+        coverKey: coverKey || null
       });
     }
     if (IS_DEV) {
@@ -2988,15 +2925,44 @@ app.get('/api/projects/:slug', async (req, res) => {
       [row.project_id]
     );
 
-    const project = await buildProjectPayload(row, { includeSignedCover: true });
+    const baseProject = await buildProjectPayload(row, { includeSignedCover: true });
+    const project = {
+      ...baseProject,
+      coverRef: baseProject.coverImageUrl || '',
+      coverImageUrl: baseProject.coverUrl || ''
+    };
 
-    const tracks = trackResult.rows.map((track, index) => {
-      const storagePath = normalizeTrackStoragePath(track.storage_path, track.mp3_url);
+    const tracks = await Promise.all(trackResult.rows.map(async (track, index) => {
+      const audioKey = normalizeTrackStoragePath(
+        track.audio_key,
+        track.audio_path || track.storage_path || track.mp3_url
+      ) || '';
       const audioPath =
-        normalizeTrackAudioPath(track.audio_path, storagePath, track.mp3_url) || storagePath || '';
-      const audioUrl =
-        normalizeTrackAudioUrl(track.audio_url, storagePath ? '' : track.mp3_url) || '';
-      const trackUrl = String(track.mp3_url || '').trim();
+        normalizeTrackAudioPath(track.audio_path, audioKey, track.mp3_url) || audioKey || '';
+      const externalTrackUrl = audioKey
+        ? ''
+        : String(
+            normalizeTrackAudioUrl(
+              track.audio_url,
+              isAssetRef(track.mp3_url) ? '' : track.mp3_url
+            ) || ''
+          ).trim();
+      let signedPlayback = null;
+      if (audioKey) {
+        try {
+          signedPlayback = await resolveTrackPlaybackUrlFromStoragePath(audioKey);
+        } catch (error) {
+          console.error('[TRACK_SIGN_FAILED]', {
+            slug,
+            projectId: row.project_id,
+            trackId: track.track_id,
+            audioKey,
+            error: String(error?.message || error || 'unknown')
+          });
+        }
+      }
+      const audioUrl = String(signedPlayback?.url || externalTrackUrl || '').trim();
+      const audioUrlExpiresAt = signedPlayback?.expiresAt || null;
       const trackNoValue = Number(track.track_no ?? track.sort_order ?? index + 1);
       const trackNo = Number.isFinite(trackNoValue)
         ? Math.max(1, Math.floor(trackNoValue))
@@ -3005,28 +2971,49 @@ app.get('/api/projects/:slug', async (req, res) => {
       const sortOrder = Number.isFinite(sortOrderValue)
         ? Math.max(0, Math.floor(sortOrderValue))
         : trackNo;
-      const mp3Url = storagePath
-        ? createAssetRef(storagePath)
-        : String(track.mp3_url || '').trim();
 
       return {
         trackId: track.track_id,
         projectId: track.project_id,
         title: track.title,
         trackNo,
-        storagePath: storagePath || audioPath || '',
-        storageBucket: (storagePath || audioPath) ? SUPABASE_BUCKET : '',
+        audioKey: audioKey || null,
+        storagePath: audioKey || audioPath || '',
+        storageBucket: audioKey ? (S3_BUCKET || '') : '',
         audioPath,
         audio_path: audioPath,
         audioUrl,
         audio_url: audioUrl,
-        trackUrl: trackUrl || '',
-        mp3Url: mp3Url || audioUrl || '',
+        audioUrlExpiresAt,
+        trackUrl: audioUrl || externalTrackUrl || '',
+        mp3Url: audioUrl || externalTrackUrl || '',
         artworkUrl: track.artwork_url || '',
         sortOrder,
         createdAt: track.created_at
       };
-    });
+    }));
+
+    const tracksMissingPlayableUrl = tracks.filter((track) => !String(track.audioUrl || '').trim());
+    if (tracks.length > 0 && tracksMissingPlayableUrl.length === tracks.length) {
+      console.error('[ALBUM_FETCH_NO_PLAYABLE_TRACKS]', {
+        slug,
+        projectId: row.project_id,
+        trackCount: tracks.length
+      });
+    } else if (tracksMissingPlayableUrl.length > 0) {
+      console.warn('[ALBUM_FETCH_TRACKS_MISSING_AUDIO]', {
+        slug,
+        projectId: row.project_id,
+        missingTrackIds: tracksMissingPlayableUrl.map((track) => track.trackId)
+      });
+    }
+    if (project.coverKey && !project.coverUrl) {
+      console.error('[ALBUM_FETCH_COVER_SIGN_FAILED]', {
+        slug,
+        projectId: row.project_id,
+        coverKey: project.coverKey
+      });
+    }
 
     if (IS_DEV) {
       console.log('[DEV] project fetch', {
@@ -3036,9 +3023,9 @@ app.get('/api/projects/:slug', async (req, res) => {
       });
 
       const suspectUrls = [
-        project.coverImageUrl,
+        project.coverUrl,
         ...tracks.map((t) => t.audioUrl),
-        ...tracks.map((t) => t.mp3Url),
+        ...tracks.map((t) => t.trackUrl),
         ...tracks.map((t) => t.artworkUrl)
       ].filter(Boolean);
       const hasLocalPaths = suspectUrls.some((url) => /^([a-zA-Z]:\\\\|file:|\\\\)/.test(url));

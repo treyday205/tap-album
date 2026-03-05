@@ -13,10 +13,9 @@ import {
   collectAssetRefs,
   getAssetKey,
   isAssetRef,
-  parseSupabaseStorageObjectUrl,
   resolveAssetUrl
 } from '../services/assets';
-import { collectBankRefs, resolveBankUrls, saveBankAsset } from '../services/assetBank';
+import { collectBankRefs, resolveBankUrls } from '../services/assetBank';
 import {
   applyTrackStorageRecoveries,
   collectTrackStorageRecoveries,
@@ -27,7 +26,6 @@ import {
   DEFAULT_TRACK_STORAGE,
   type SignedTrackUrlCache
 } from '../services/trackAudio';
-import { SUPABASE_URL } from '../services/supabaseAuth';
 import ResponsiveImage from '../components/ResponsiveImage';
 
 const TracklistTab = lazy(() => import('../components/editor/EditorTracklistTab'));
@@ -550,30 +548,8 @@ const EditorPage: React.FC = () => {
     }
   };
 
-  const readFileAsDataUrl = (file: File) =>
-    new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || ''));
-      reader.onerror = () => reject(reader.error || new Error('Failed to read file.'));
-      reader.readAsDataURL(file);
-    });
-
   const defaultStorageBucket = String(DEFAULT_TRACK_STORAGE.bucket || '').trim() || 'tap-album';
-
-  const buildCanonicalSupabaseTrackUrl = (
-    storagePath: string | undefined | null,
-    bucket: string | undefined | null
-  ): string => {
-    const normalizedPath = String(storagePath || '').trim().replace(/^\/+/, '');
-    const normalizedBucket = String(bucket || defaultStorageBucket).trim();
-    const normalizedBase = String(SUPABASE_URL || '').trim().replace(/\/+$/, '');
-    if (!normalizedPath || !normalizedBucket || !normalizedBase) return '';
-    const encodedPath = normalizedPath
-      .split('/')
-      .map((segment) => encodeURIComponent(segment))
-      .join('/');
-    return `${normalizedBase}/storage/v1/object/public/${encodeURIComponent(normalizedBucket)}/${encodedPath}`;
-  };
+  const ASSET_KEY_REGEX = /^[a-z0-9/_\-.]+$/i;
 
   const deriveTrackStorageTarget = (value: string | undefined | null) => {
     const trimmed = String(value || '').trim();
@@ -586,56 +562,23 @@ const EditorPage: React.FC = () => {
       };
     }
 
-    const parsedSupabase = parseSupabaseStorageObjectUrl(trimmed);
-    if (!parsedSupabase) return null;
+    if (
+      ASSET_KEY_REGEX.test(trimmed) &&
+      trimmed.includes('/') &&
+      !trimmed.includes('..') &&
+      !/^https?:\/\//i.test(trimmed)
+    ) {
+      return {
+        bucket: defaultStorageBucket,
+        storagePath: trimmed
+      };
+    }
 
-    return {
-      bucket: parsedSupabase.bucket,
-      storagePath: parsedSupabase.storagePath
-    };
+    return null;
   };
 
   const storagePathFromTrackValue = (value: string | undefined | null) =>
     deriveTrackStorageTarget(value)?.storagePath || '';
-
-  const storeLocalImageAsset = async (
-    file: File,
-    meta: { projectId: string; kind: string; trackId?: string }
-  ): Promise<string> => {
-    try {
-      const stored = await saveBankAsset(file, meta);
-      if (stored?.ref) {
-        setAssetUrls((prev) => ({ ...prev, [stored.ref]: stored.url }));
-        return stored.ref;
-      }
-    } catch (err) {
-      if (import.meta.env.DEV) {
-        console.warn('[DEV] asset bank save failed, falling back to data URL', err);
-      }
-    }
-
-    const dataUrl = await readFileAsDataUrl(file);
-    if (!dataUrl) {
-      throw new Error('Unable to store image locally.');
-    }
-    return dataUrl;
-  };
-
-  const storeLocalAudioAsset = async (
-    file: File,
-    meta: { projectId: string; trackId?: string }
-  ): Promise<string> => {
-    const stored = await saveBankAsset(file, {
-      projectId: meta.projectId,
-      trackId: meta.trackId,
-      kind: 'track-audio'
-    });
-    if (stored?.ref) {
-      setAssetUrls((prev) => ({ ...prev, [stored.ref]: stored.url }));
-      return stored.ref;
-    }
-    throw new Error('Unable to store audio locally.');
-  };
 
   useEffect(() => {
     if (!project) return;
@@ -832,9 +775,26 @@ const EditorPage: React.FC = () => {
         setUploadingTrackId(trackId);
         setUploadProgress(prev => ({ ...prev, [trackId]: 0 }));
         try {
-          const result = await Api.uploadTrackAudio(file, projectId, trackId, (percent) => {
-            setUploadProgress(prev => ({ ...prev, [trackId]: percent }));
-          });
+          const trackSnapshot =
+            tracks.find((item) => item.trackId === trackId) ||
+            newTracks.find((item) => item.trackId === trackId);
+          const trackNumberHint = Number(trackSnapshot?.trackNo ?? trackSnapshot?.sortOrder ?? 1);
+          const resolvedTrackNumber = Number.isFinite(trackNumberHint)
+            ? Math.max(1, Math.floor(trackNumberHint))
+            : 1;
+          const trackTitleHint = String(trackSnapshot?.title || autoTitle(file.name)).trim() || autoTitle(file.name);
+          const result = await Api.uploadTrackAudio(
+            file,
+            projectId,
+            trackId,
+            {
+              trackNumber: resolvedTrackNumber,
+              title: trackTitleHint
+            },
+            (percent) => {
+              setUploadProgress(prev => ({ ...prev, [trackId]: percent }));
+            }
+          );
           const assetRef = result?.assetRef || '';
           if (!assetRef) {
             throw new Error('Upload did not return a file URL.');
@@ -846,29 +806,24 @@ const EditorPage: React.FC = () => {
             throw new Error('Upload did not return a storage path.');
           }
           const nextStorageBucket = String(result?.bucket || defaultStorageBucket).trim() || defaultStorageBucket;
-          const nextTrackUrl = buildCanonicalSupabaseTrackUrl(nextStoragePath, nextStorageBucket);
           if (import.meta.env.DEV) {
             console.log('[DEV] track upload storage target', {
               projectId,
               trackId,
               assetRef,
-              presignBucket: String(result?.bucket || '').trim() || null,
-              presignBucketPublic:
-                typeof result?.bucketPublic === 'boolean' ? result.bucketPublic : null,
               storagePath: nextStoragePath || null,
-              bucket: nextStorageBucket,
-              trackUrl: nextTrackUrl || null
+              bucket: nextStorageBucket
             });
           }
 
           handleUpdateTrack(trackId, {
             mp3Url: assetRef,
-            trackUrl: nextTrackUrl || '',
+            trackUrl: '',
             storageBucket: nextStorageBucket,
             storagePath: nextStoragePath,
             audioPath: nextStoragePath,
             audioUrl: '',
-            title: autoTitle(file.name)
+            title: trackTitleHint
           });
           ensureSignedAssets([assetRef]);
           try {
@@ -878,7 +833,8 @@ const EditorPage: React.FC = () => {
               trackId,
               {
                 storagePath: nextStoragePath,
-                trackUrl: nextTrackUrl || null
+                trackNumber: resolvedTrackNumber,
+                title: trackTitleHint
               },
               adminToken
             );
@@ -898,7 +854,7 @@ const EditorPage: React.FC = () => {
             const persistedTrackUrl = String(
               persistedTrack.trackUrl ||
               persistedTrack.track_url ||
-              nextTrackUrl ||
+              persistedAudioUrl ||
               ''
             ).trim();
             const persistedStorageBucket = String(
@@ -909,11 +865,11 @@ const EditorPage: React.FC = () => {
 
             if (uploadPerTrackEnabled) {
               handleUpdateTrack(trackId, {
-                audioUrl: '',
+                audioUrl: persistedAudioUrl || '',
                 audioPath: persistedAudioPath || nextStoragePath,
                 storagePath: persistedAudioPath || nextStoragePath,
                 storageBucket: persistedStorageBucket || nextStorageBucket,
-                trackUrl: persistedTrackUrl || nextTrackUrl
+                trackUrl: persistedTrackUrl
               });
             } else if (persistedAudioUrl) {
               handleUpdateTrack(trackId, {
@@ -921,13 +877,17 @@ const EditorPage: React.FC = () => {
                 audioPath: persistedAudioPath || nextStoragePath,
                 storagePath: persistedAudioPath || nextStoragePath,
                 storageBucket: persistedStorageBucket || nextStorageBucket,
-                trackUrl: persistedTrackUrl || nextTrackUrl
+                trackUrl: persistedTrackUrl
               });
             }
           } catch (persistErr) {
-            if (import.meta.env.DEV) {
-              console.warn('[DEV] track audio URL auto-save failed', persistErr);
-            }
+            console.error('[UPLOAD][TRACK] DB persist failed', {
+              projectId,
+              trackId,
+              storagePath: nextStoragePath,
+              error: String((persistErr as any)?.message || persistErr || 'unknown')
+            });
+            throw persistErr;
           }
 
           if (uploadPerTrackEnabled && orderedUploads.length === 1) {
@@ -936,7 +896,7 @@ const EditorPage: React.FC = () => {
               ? {
                   ...sourceTrack,
                   mp3Url: assetRef,
-                  trackUrl: nextTrackUrl || sourceTrack.trackUrl || '',
+                  trackUrl: sourceTrack.trackUrl || '',
                   storageBucket: nextStorageBucket,
                   audioPath: nextStoragePath,
                   storagePath: nextStoragePath,
@@ -947,7 +907,7 @@ const EditorPage: React.FC = () => {
                   projectId,
                   title: autoTitle(file.name),
                   mp3Url: assetRef,
-                  trackUrl: nextTrackUrl || '',
+                  trackUrl: '',
                   storageBucket: nextStorageBucket,
                   audioPath: nextStoragePath,
                   storagePath: nextStoragePath,
@@ -977,26 +937,7 @@ const EditorPage: React.FC = () => {
 
           setUploadError(null);
         } catch (err: any) {
-          try {
-            const localRef = await storeLocalAudioAsset(file, { projectId, trackId });
-            handleUpdateTrack(trackId, {
-              mp3Url: localRef,
-              trackUrl: '',
-              storageBucket: '',
-              audioUrl: localRef,
-              audioPath: '',
-              storagePath: '',
-              title: autoTitle(file.name)
-            });
-            const fallbackMessage = String(err?.message || '').trim();
-            if (fallbackMessage) {
-              setUploadError(`Supabase upload failed, using local fallback: ${fallbackMessage}`);
-            } else {
-              setUploadError('Supabase upload failed, using local fallback.');
-            }
-          } catch (fallbackErr: any) {
-            throw fallbackErr || err;
-          }
+          throw err;
         }
       };
 
@@ -1051,38 +992,37 @@ const EditorPage: React.FC = () => {
       try {
         const result = await Api.uploadAsset(file, projectId, { assetKind: 'project-cover' });
         const assetRef = result?.assetRef || '';
+        const coverKey = String(result?.storagePath || storagePathFromTrackValue(assetRef)).trim();
         if (!assetRef) {
           throw new Error('Upload did not return a file URL.');
         }
+        if (!coverKey) {
+          throw new Error('Upload did not return a cover key.');
+        }
         const adminToken = localStorage.getItem('tap_admin_token') || undefined;
-        try {
-          const persisted = await Api.updateProjectCover(projectId, assetRef, adminToken);
-          const persistedCover = String(
-            persisted?.project?.coverImageUrl ||
-            persisted?.coverPath ||
-            assetRef
-          ).trim();
-          handleSaveProject({
-            coverImageUrl: persistedCover,
-            updatedAt: persisted?.project?.updatedAt || new Date().toISOString()
-          });
-        } catch {
-          handleSaveProject({ coverImageUrl: assetRef });
-        }
+        const persisted = await Api.updateProjectCover(
+          projectId,
+          {
+            coverKey,
+            coverMime: result?.contentType || file.type || undefined
+          },
+          adminToken
+        );
+        const persistedCover = String(
+          persisted?.project?.coverImageUrl ||
+          persisted?.coverPath ||
+          assetRef
+        ).trim();
+        handleSaveProject({
+          coverImageUrl: persistedCover,
+          updatedAt: persisted?.project?.updatedAt || new Date().toISOString()
+        });
         ensureSignedAssets([assetRef]);
+        setUploadError(null);
       } catch (err: any) {
-        try {
-          const localRef = await storeLocalImageAsset(file, {
-            projectId,
-            kind: 'project-cover'
-          });
-          handleSaveProject({ coverImageUrl: localRef });
-          setUploadError(null);
-        } catch (fallbackErr: any) {
-          const message = fallbackErr?.message || err?.message || 'Upload failed.';
-          setUploadError(message);
-          alert(message);
-        }
+        const message = err?.message || 'Upload failed.';
+        setUploadError(message);
+        alert(message);
       } finally {
         e.target.value = '';
       }
@@ -1106,20 +1046,11 @@ const EditorPage: React.FC = () => {
       }
       handleUpdateTrack(uploadTargetTrackId, { artworkUrl: assetRef });
       ensureSignedAssets([assetRef]);
+      setUploadError(null);
     } catch (err: any) {
-      try {
-        const localRef = await storeLocalImageAsset(file, {
-          projectId,
-          trackId: uploadTargetTrackId,
-          kind: 'track-artwork'
-        });
-        handleUpdateTrack(uploadTargetTrackId, { artworkUrl: localRef });
-        setUploadError(null);
-      } catch (fallbackErr: any) {
-        const message = fallbackErr?.message || err?.message || 'Upload failed.';
-        setUploadError(message);
-        alert(message);
-      }
+      const message = err?.message || 'Upload failed.';
+      setUploadError(message);
+      alert(message);
     } finally {
       setUploadTargetTrackId(null);
       e.target.value = '';

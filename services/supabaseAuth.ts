@@ -14,32 +14,19 @@ const firstNonEmpty = (...values: unknown[]): string => {
   return '';
 };
 
-const parseOptionalBoolean = (value: string): boolean | null => {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (!normalized) return null;
-  if (normalized === 'true') return true;
-  if (normalized === 'false') return false;
-  return null;
-};
-
 const clientSupabaseUrl = String(import.meta.env.VITE_SUPABASE_URL || '').trim();
 const clientSupabaseAnonKey = firstNonEmpty(
   import.meta.env.VITE_SUPABASE_ANON_KEY,
   import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY
 );
-const clientSupabaseStorageBucket = String(import.meta.env.VITE_SUPABASE_STORAGE_BUCKET || '').trim();
-const clientSupabaseBucketPublic = String(import.meta.env.VITE_SUPABASE_BUCKET_PUBLIC || '').trim();
 
 export const SUPABASE_URL = normalizeUrl(clientSupabaseUrl);
 
 export const SUPABASE_ANON_KEY = clientSupabaseAnonKey;
 
-export const SUPABASE_STORAGE_BUCKET = clientSupabaseStorageBucket || 'tap-album';
-
-export const SUPABASE_BUCKET_PUBLIC = parseOptionalBoolean(clientSupabaseBucketPublic);
-
-export const isSupabaseStorageConfigured = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
-export const isSupabaseAuthEnabled = isSupabaseStorageConfigured;
+export const isSupabaseAuthConfigured = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+export const isSupabaseStorageConfigured = isSupabaseAuthConfigured;
+export const isSupabaseAuthEnabled = isSupabaseAuthConfigured;
 
 export const supabaseAuthClient = isSupabaseAuthEnabled
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {

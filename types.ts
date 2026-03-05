@@ -19,6 +19,11 @@ export interface Project {
   title: string;
   artistName: string;
   coverImageUrl: string;
+  coverRef?: string | null;
+  coverKey?: string | null;
+  coverMime?: string | null;
+  coverUrl?: string | null;
+  coverUrlExpiresAt?: number | null;
   coverPath?: string | null;
   coverSignedUrl?: string | null;
   trackCount?: number;
@@ -62,8 +67,10 @@ export interface Track {
   title: string;
   mp3Url: string;
   trackUrl?: string;
+  audioKey?: string | null;
   storageBucket?: string;
   audioUrl?: string;
+  audioUrlExpiresAt?: number | null;
   audioPath?: string;
   storagePath?: string;
   trackNo?: number;

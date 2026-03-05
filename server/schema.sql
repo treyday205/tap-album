@@ -111,6 +111,8 @@ CREATE TABLE IF NOT EXISTS projects (
   slug TEXT NOT NULL UNIQUE,
   title TEXT NOT NULL,
   artist_name TEXT NOT NULL,
+  cover_key TEXT,
+  cover_mime TEXT,
   cover_image_url TEXT,
   pin_unlock_count INTEGER NOT NULL DEFAULT 0,
   pin_active_count INTEGER NOT NULL DEFAULT 0,
@@ -119,6 +121,12 @@ CREATE TABLE IF NOT EXISTS projects (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE projects
+  ADD COLUMN IF NOT EXISTS cover_key TEXT;
+
+ALTER TABLE projects
+  ADD COLUMN IF NOT EXISTS cover_mime TEXT;
 
 ALTER TABLE projects
   ADD COLUMN IF NOT EXISTS pin_unlock_count INTEGER NOT NULL DEFAULT 0;
@@ -159,11 +167,17 @@ FROM (
 WHERE p.project_id = stats.project_id
   AND p.pin_active_count <> stats.active_count;
 
+UPDATE projects
+SET cover_key = SUBSTRING(cover_image_url FROM 7)
+WHERE (cover_key IS NULL OR BTRIM(cover_key) = '')
+  AND cover_image_url LIKE 'asset:%';
+
 CREATE TABLE IF NOT EXISTS tracks (
   track_id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
   title TEXT NOT NULL,
   track_no INTEGER NOT NULL DEFAULT 0,
+  audio_key TEXT,
   storage_path TEXT,
   audio_path TEXT,
   audio_url TEXT,
@@ -176,6 +190,9 @@ CREATE TABLE IF NOT EXISTS tracks (
 
 ALTER TABLE tracks
   ADD COLUMN IF NOT EXISTS track_no INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE tracks
+  ADD COLUMN IF NOT EXISTS audio_key TEXT;
 
 ALTER TABLE tracks
   ADD COLUMN IF NOT EXISTS storage_path TEXT;
@@ -208,6 +225,17 @@ UPDATE tracks
 SET audio_url = mp3_url
 WHERE (audio_url IS NULL OR BTRIM(audio_url) = '')
   AND mp3_url ILIKE 'http%';
+
+UPDATE tracks
+SET audio_key = COALESCE(
+  NULLIF(BTRIM(audio_path), ''),
+  NULLIF(BTRIM(storage_path), ''),
+  CASE
+    WHEN mp3_url LIKE 'asset:%' THEN SUBSTRING(mp3_url FROM 7)
+    ELSE NULL
+  END
+)
+WHERE audio_key IS NULL OR BTRIM(audio_key) = '';
 
 CREATE INDEX IF NOT EXISTS idx_projects_slug ON projects (slug);
 CREATE INDEX IF NOT EXISTS idx_tracks_project ON tracks (project_id);

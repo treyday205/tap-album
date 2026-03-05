@@ -126,7 +126,7 @@ const EditorTracklistTab: React.FC<EditorTracklistTabProps> = ({
               )}
               {isLocalOnlyAudio && (
                 <div className="inline-flex items-center rounded-full border border-amber-400/40 bg-amber-500/10 px-3 py-1 text-[10px] font-black uppercase tracking-widest text-amber-300">
-                  Local Only - Needs Supabase Upload
+                  Local Only - Needs R2 Upload
                 </div>
               )}
               <div className="flex items-center justify-between">
