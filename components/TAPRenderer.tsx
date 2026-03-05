@@ -1,5 +1,5 @@
 ﻿
-import React, { useCallback, useEffect, useState, useRef, memo } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useState, useRef, memo } from 'react';
 import { Music2, Instagram, Twitter, Video, Facebook, Play, Pause } from 'lucide-react';
 import { Project, Track, EventType } from '../types';
 import { StorageService } from '../services/storage';
@@ -52,6 +52,206 @@ type CorsHeadProbeResult = {
   url: string;
   origin: string;
   host: string;
+};
+
+type GlobalPlayerStore = {
+  currentTrackId: string | null;
+  isPlaying: boolean;
+  currentTime: number;
+  duration: number;
+  setCurrentTrack: (track: Track) => void;
+  playCurrentTrack: () => Promise<void>;
+  pauseCurrentTrack: () => void;
+  toggleTrackPlayback: (track: Track) => void;
+  seekTo: (nextTime: number) => void;
+};
+
+const GlobalPlayerContext = React.createContext<GlobalPlayerStore | null>(null);
+
+const useGlobalPlayerStore = (): GlobalPlayerStore => {
+  const store = useContext(GlobalPlayerContext);
+  if (!store) {
+    throw new Error('useGlobalPlayerStore must be used within GlobalPlayerContext.Provider');
+  }
+  return store;
+};
+
+type TrackListRowsProps = {
+  displayTracks: Track[];
+  projectArtistName: string;
+  coverSrc: string;
+  resolveUrl: (value: string) => string;
+  canPlayTrack: (track: Track, resolvedUrl: string) => boolean;
+  onTrackPress: (track: Track) => void;
+  isPreview: boolean;
+};
+
+const TrackListRows: React.FC<TrackListRowsProps> = ({
+  displayTracks,
+  projectArtistName,
+  coverSrc,
+  resolveUrl,
+  canPlayTrack,
+  onTrackPress,
+  isPreview
+}) => {
+  const { currentTrackId, isPlaying } = useGlobalPlayerStore();
+
+  return (
+    <>
+      {displayTracks.map((track, index) => {
+        const audioUrl = resolveUrl(String(track.trackUrl || track.audioUrl || track.mp3Url || '').trim());
+        const isActiveTrack = currentTrackId === track.trackId;
+        return (
+          <TrackRow
+            key={track.trackId}
+            track={track}
+            artworkUrl={resolveUrl(track.artworkUrl || '') || coverSrc}
+            subtext={projectArtistName || ''}
+            trackNumber={index + 1}
+            audioUrl={audioUrl}
+            canPlay={canPlayTrack(track, audioUrl)}
+            isPlaying={Boolean(isPlaying && isActiveTrack)}
+            isActive={isActiveTrack}
+            onTogglePlay={onTrackPress}
+            isPreview={isPreview}
+          />
+        );
+      })}
+    </>
+  );
+};
+
+type GlobalNowPlayingBarProps = {
+  isPreview: boolean;
+  audioElementKey: number;
+  setAudioElementRef: (node: HTMLAudioElement | null) => void;
+  nowPlayingTrack: Track | null;
+  nowPlayingArtwork: string;
+  onAudioEnded: React.ReactEventHandler<HTMLAudioElement>;
+  onAudioPlay: React.ReactEventHandler<HTMLAudioElement>;
+  onAudioPause: React.ReactEventHandler<HTMLAudioElement>;
+  onAudioStalled: React.ReactEventHandler<HTMLAudioElement>;
+  onAudioWaiting: React.ReactEventHandler<HTMLAudioElement>;
+  onAudioError: React.ReactEventHandler<HTMLAudioElement>;
+  onAudioTimeUpdate: React.ReactEventHandler<HTMLAudioElement>;
+  onAudioLoadedMetadata: React.ReactEventHandler<HTMLAudioElement>;
+  onAudioDurationChange: React.ReactEventHandler<HTMLAudioElement>;
+};
+
+const GlobalNowPlayingBar: React.FC<GlobalNowPlayingBarProps> = ({
+  isPreview,
+  audioElementKey,
+  setAudioElementRef,
+  nowPlayingTrack,
+  nowPlayingArtwork,
+  onAudioEnded,
+  onAudioPlay,
+  onAudioPause,
+  onAudioStalled,
+  onAudioWaiting,
+  onAudioError,
+  onAudioTimeUpdate,
+  onAudioLoadedMetadata,
+  onAudioDurationChange
+}) => {
+  const {
+    currentTrackId,
+    isPlaying,
+    currentTime,
+    duration,
+    setCurrentTrack,
+    playCurrentTrack,
+    pauseCurrentTrack,
+    seekTo
+  } = useGlobalPlayerStore();
+
+  if (isPreview) {
+    return null;
+  }
+
+  const progressMax = duration > 0 ? duration : 1;
+  const progressValue = Math.min(progressMax, Math.max(0, currentTime));
+  const isActiveTrackPlaying = Boolean(
+    nowPlayingTrack &&
+    currentTrackId === nowPlayingTrack.trackId &&
+    isPlaying
+  );
+
+  return (
+    <>
+      <audio
+        key={audioElementKey}
+        ref={setAudioElementRef}
+        onEnded={onAudioEnded}
+        onPlay={onAudioPlay}
+        onPause={onAudioPause}
+        onStalled={onAudioStalled}
+        onWaiting={onAudioWaiting}
+        onError={onAudioError}
+        onTimeUpdate={onAudioTimeUpdate}
+        onLoadedMetadata={onAudioLoadedMetadata}
+        onDurationChange={onAudioDurationChange}
+        playsInline
+        autoPlay={false}
+        preload="auto"
+        className="hidden"
+      />
+
+      {nowPlayingTrack && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-0 z-30 px-3 pb-[calc(env(safe-area-inset-bottom)+0.65rem)]">
+          <div className="pointer-events-auto mx-auto w-full max-w-[520px] rounded-[1.7rem] border border-white/10 bg-slate-900/90 backdrop-blur-2xl shadow-[0_-20px_60px_rgba(0,0,0,0.65)] p-3">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-xl overflow-hidden border border-slate-700/80 bg-slate-800 flex-shrink-0">
+                {nowPlayingArtwork ? (
+                  <img src={nowPlayingArtwork} alt={nowPlayingTrack.title} className="w-full h-full object-cover" loading="eager" decoding="async" />
+                ) : (
+                  <div className="w-full h-full bg-slate-800" />
+                )}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-[10px] uppercase tracking-[0.24em] font-black text-slate-500">Now Playing</p>
+                <p className="text-sm font-black text-white truncate">{nowPlayingTrack.title}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (isActiveTrackPlaying) {
+                    pauseCurrentTrack();
+                    return;
+                  }
+                  setCurrentTrack(nowPlayingTrack);
+                  void playCurrentTrack();
+                }}
+                className="w-12 h-12 rounded-full bg-green-500 text-black flex items-center justify-center active:scale-95 touch-manipulation shadow-lg shadow-green-500/20"
+                aria-label={isActiveTrackPlaying ? 'Pause track' : 'Play track'}
+              >
+                {isActiveTrackPlaying ? <Pause size={20} fill="currentColor" /> : <Play size={20} className="ml-0.5" fill="currentColor" />}
+              </button>
+            </div>
+            <div className="mt-2 flex items-center gap-2">
+              <span className="w-9 text-[10px] text-slate-500 font-bold tabular-nums">{formatTime(currentTime)}</span>
+              <input
+                type="range"
+                min={0}
+                max={progressMax}
+                step={1}
+                value={progressValue}
+                onChange={(event) => {
+                  const next = Number(event.target.value);
+                  if (!Number.isFinite(next)) return;
+                  seekTo(next);
+                }}
+                className="tap-progress w-full"
+                aria-label="Track progress"
+              />
+              <span className="w-9 text-right text-[10px] text-slate-500 font-bold tabular-nums">{formatTime(duration)}</span>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
 };
 
 const TAPRenderer: React.FC<TAPRendererProps> = ({
@@ -1186,12 +1386,36 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     }
   };
 
-  const handleSeek = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const next = Number(event.target.value);
+  const setCurrentTrack = useCallback((track: Track) => {
+    activeTrackRef.current = track;
+    setPlaybackError(null);
+  }, []);
+
+  const playCurrentTrack = useCallback(async () => {
+    const activeTrack = activeTrackRef.current;
+    if (!activeTrack) return;
+    await handleTogglePlay(activeTrack);
+  }, [handleTogglePlay]);
+
+  const pauseCurrentTrack = useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    manualPauseRef.current = true;
+    clearStallRecoveryTimer();
+    audio.pause();
+    setIsPlaying(false);
+  }, []);
+
+  const toggleTrackPlayback = useCallback((track: Track) => {
+    setCurrentTrack(track);
+    void playCurrentTrack();
+  }, [setCurrentTrack, playCurrentTrack]);
+
+  const seekTo = useCallback((next: number) => {
     if (!Number.isFinite(next) || !audioRef.current) return;
     audioRef.current.currentTime = next;
     setCurrentTime(next);
-  };
+  }, []);
 
   const mp3Tracks = tracks.filter((track) => {
     const rawUrl = getTrackAudioValue(track);
@@ -1391,8 +1615,28 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   const nowPlayingArtwork = nowPlayingTrack
     ? (resolveUrl(nowPlayingTrack.artworkUrl || '') || coverSrc)
     : coverSrc;
-  const progressMax = duration > 0 ? duration : 1;
-  const progressValue = Math.min(progressMax, Math.max(0, currentTime));
+
+  const playerStore = useMemo<GlobalPlayerStore>(() => ({
+    currentTrackId: currentlyPlayingTrackId,
+    isPlaying,
+    currentTime,
+    duration,
+    setCurrentTrack,
+    playCurrentTrack,
+    pauseCurrentTrack,
+    toggleTrackPlayback,
+    seekTo
+  }), [
+    currentlyPlayingTrackId,
+    isPlaying,
+    currentTime,
+    duration,
+    setCurrentTrack,
+    playCurrentTrack,
+    pauseCurrentTrack,
+    toggleTrackPlayback,
+    seekTo
+  ]);
 
   const normalizeSocialUrl = (value: string, provider: string): string => {
     const raw = String(value || '').trim();
@@ -1445,172 +1689,9 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   const merchUrl = normalizeCtaUrl(project.merchUrl || '');
 
   return (
-    <div className={`${isPreview ? 'w-full h-full bg-slate-950 overflow-y-auto scrollbar-hide text-slate-100 flex flex-col' : 'relative w-full tap-full-height bg-slate-950 text-slate-100 flex flex-col'}`}>
-      <audio
-        key={audioElementKey}
-        ref={setAudioElementRef}
-        onEnded={(event) => {
-          clearStallRecoveryTimer();
-          activeTrackRef.current = null;
-          manualPauseRef.current = false;
-          lastTimeUpdateLogSecondRef.current = -1;
-          setIsPlaying(false);
-          setCurrentlyPlayingTrackId(null);
-          setCurrentTime(0);
-          logAudioEvent('ended', event.currentTarget);
-        }}
-        onPlay={(event) => {
-          manualPauseRef.current = false;
-          clearStallRecoveryTimer();
-          setPlaybackError(null);
-          setIsPlaying(true);
-          setMediaSession(toMediaSessionTrack(activeTrackRef.current));
-          logAudioEvent('play', event.currentTarget, { reason: 'audio-event' });
-        }}
-        onPause={(event) => {
-          setIsPlaying(false);
-          setMediaSession(toMediaSessionTrack(activeTrackRef.current));
-          logAudioEvent('pause', event.currentTarget, { reason: manualPauseRef.current ? 'user-pause' : 'audio-event' });
-        }}
-        onStalled={(event) => {
-          logAudioEvent('stalled', event.currentTarget);
-          startStallRecovery('stalled');
-        }}
-        onWaiting={(event) => {
-          logAudioEvent('waiting', event.currentTarget);
-          startStallRecovery('waiting');
-        }}
-        onError={(event) => {
-          const code = event.currentTarget.error?.code || 0;
-          const failingTrack = activeTrackRef.current;
-          const failingUrl = String(event.currentTarget.currentSrc || event.currentTarget.src || '').trim();
-          const noSourceLikeError = code === 4 || (
-            typeof HTMLMediaElement !== 'undefined' &&
-            event.currentTarget.networkState === HTMLMediaElement.NETWORK_NO_SOURCE
-          );
-          console.error('[AUDIO] audio.onerror', {
-            projectId: project.projectId,
-            trackId: failingTrack?.trackId || null,
-            code: code || null,
-            finalCurrentSrc: String(event.currentTarget.currentSrc || '').trim() || null,
-            currentSrc: String(event.currentTarget.currentSrc || '').trim() || null,
-            src: String(event.currentTarget.src || '').trim() || null,
-            attrSrc: String(event.currentTarget.getAttribute('src') || '').trim() || null,
-            readyState: event.currentTarget.readyState,
-            networkState: event.currentTarget.networkState,
-            paused: event.currentTarget.paused
-          });
-          if (failingTrack && failingUrl && noSourceLikeError) {
-            const rebuildSignature = `${failingTrack.trackId}:${normalizeRuntimeAudioUrl(failingUrl)}:${code || 0}`;
-            if (lastOnErrorRebuildSignatureRef.current !== rebuildSignature) {
-              lastOnErrorRebuildSignatureRef.current = rebuildSignature;
-              void probeTrackCorsHeadSupport(failingUrl, failingTrack, 'audio-error')
-                .then((headResult) => {
-                  const info = getRuntimeUrlInfo(failingUrl);
-                  const missingRangeHeader = headResult.ok && !headResult.rangeHeaderPresent;
-                  const suspiciousMimeType = headResult.ok && Boolean(headResult.contentType) &&
-                    !/^audio\//i.test(headResult.contentType) &&
-                    !/octet-stream/i.test(headResult.contentType);
-                  if (
-                    Boolean(info.origin) &&
-                    !info.sameOrigin &&
-                    (!headResult.ok || missingRangeHeader || suspiciousMimeType)
-                  ) {
-                    markNoCorsFallbackForUrl(failingUrl, failingTrack, 'audio-error-cors-head-incompatible', {
-                      status: headResult.status,
-                      headError: headResult.error || null,
-                      acceptRanges: headResult.acceptRanges || null,
-                      contentType: headResult.contentType || null,
-                      code
-                    });
-                    setPlaybackError('Host missing CORS/Range headers');
-                  }
-                  return rebuildAudioElement('audio.onerror-no-source', {
-                    track: failingTrack,
-                    sourceUrl: failingUrl
-                  });
-                })
-                .then((rebuiltAudio) => attachAudioSourceWithFallback(rebuiltAudio, failingUrl, failingTrack, 'error-rebuild'))
-                .then(() => {
-                  console.warn('[AUDIO] audio.onerror rebuild fallback attached source', {
-                    projectId: project.projectId,
-                    trackId: failingTrack.trackId,
-                    code,
-                    url: failingUrl
-                  });
-                })
-                .catch((fallbackError: any) => {
-                  console.error('[AUDIO] audio.onerror rebuild fallback failed', {
-                    projectId: project.projectId,
-                    trackId: failingTrack.trackId,
-                    code,
-                    url: failingUrl,
-                    error: String(fallbackError?.message || fallbackError || 'fallback failed')
-                  });
-                });
-            }
-          }
-          if (failingTrack && failingUrl) {
-            void probeTrackCorsHeadSupport(failingUrl, failingTrack, 'audio-error').then((headResult) => {
-              if (headResult.ok) return;
-              console.warn('[AUDIO] audio-element cors HEAD failed', {
-                projectId: project.projectId,
-                trackId: failingTrack.trackId,
-                url: failingUrl,
-                status: headResult.status ?? null,
-                error: headResult.error || 'HEAD failed'
-              });
-            });
-            void probeTrackAudioUrl(failingUrl, failingTrack, 'audio-error').then((probeResult) => {
-              if (probeResult.ok) return;
-              console.warn('[AUDIO] audio-element source failed', {
-                projectId: project.projectId,
-                trackId: failingTrack.trackId,
-                storageBucket: String(failingTrack.storageBucket || '').trim() || null,
-                storagePath: String(failingTrack.audioPath || failingTrack.storagePath || '').trim() || null,
-                status: probeResult.status ?? (probeResult.failureType === 'cors' ? 'CORS' : 'NETWORK'),
-                failureType: probeResult.failureType || 'http',
-                url: failingUrl,
-                error: probeResult.error || probeResult.message
-              });
-            });
-          }
-          logAudioEvent('error', event.currentTarget, { reason: 'audio-element-error', code });
-          if (code === 4 && (isNoCorsFallbackEnabledForUrl(failingUrl) || noSourceLikeError)) {
-            setPlaybackError('Host missing CORS/Range headers');
-          } else {
-            setPlaybackError(`Playback error (code ${code || 'unknown'})`);
-          }
-          startStallRecovery('error');
-        }}
-        onTimeUpdate={(event) => {
-          const next = Number(event.currentTarget.currentTime);
-          const normalized = Number.isFinite(next) ? next : 0;
-          setCurrentTime(normalized);
-          const wholeSeconds = Math.floor(normalized);
-          if (wholeSeconds !== lastTimeUpdateLogSecondRef.current) {
-            lastTimeUpdateLogSecondRef.current = wholeSeconds;
-            logAudioEvent('timeupdate', event.currentTarget);
-          }
-        }}
-        onLoadedMetadata={(event) => {
-          const next = Number(event.currentTarget.duration);
-          setDuration(Number.isFinite(next) ? next : 0);
-          setMediaSession(toMediaSessionTrack(activeTrackRef.current));
-          logAudioEvent('loadedmetadata', event.currentTarget);
-        }}
-        onDurationChange={(event) => {
-          const next = Number(event.currentTarget.duration);
-          setDuration(Number.isFinite(next) ? next : 0);
-          logAudioEvent('durationchange', event.currentTarget);
-        }}
-        playsInline
-        autoPlay={false}
-        preload="auto"
-        className="hidden"
-      />
-
-      <div className={`${isPreview ? 'h-full overflow-y-auto scrollbar-hide' : 'flex-1 overflow-y-auto tap-native-scroll pb-44'}`}>
+    <GlobalPlayerContext.Provider value={playerStore}>
+      <div className={`${isPreview ? 'w-full h-full bg-slate-950 overflow-y-auto scrollbar-hide text-slate-100 flex flex-col' : 'relative w-full tap-full-height bg-slate-950 text-slate-100 flex flex-col'}`}>
+        <div className={`${isPreview ? 'h-full overflow-y-auto scrollbar-hide' : 'flex-1 overflow-y-auto tap-native-scroll pb-44'}`}>
         {!isPreview && showMeta && (
           useGoLiveHeader ? (
             <GoLiveAlbumHeader
@@ -1700,24 +1781,15 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
                 </span>
               </div>
             )}
-            {displayTracks.map((track, index) => {
-              const audioUrl = resolveUrl(getTrackAudioValue(track));
-              return (
-                <TrackRow
-                  key={track.trackId}
-                  track={track}
-                  artworkUrl={resolveUrl(track.artworkUrl || '') || coverSrc}
-                  subtext={project.artistName || ''}
-                  trackNumber={index + 1}
-                  audioUrl={audioUrl}
-                  canPlay={canPlayTrack(track, audioUrl)}
-                  isPlaying={isPlaying && currentlyPlayingTrackId === track.trackId}
-                  isActive={currentlyPlayingTrackId === track.trackId}
-                  onTogglePlay={handleTogglePlay}
-                  isPreview={isPreview}
-                />
-              );
-            })}
+            <TrackListRows
+              displayTracks={displayTracks}
+              projectArtistName={project.artistName || ''}
+              coverSrc={coverSrc}
+              resolveUrl={resolveUrl}
+              canPlayTrack={canPlayTrack}
+              onTrackPress={toggleTrackPlayback}
+              isPreview={isPreview}
+            />
             {displayTracks.length === 0 && (
               <div className="py-12 text-center bg-slate-900/20 rounded-[2rem] border border-dashed border-slate-800/60">
                 <Music2 size={32} className="mx-auto text-slate-700 mb-3" />
@@ -1755,48 +1827,170 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
         </div>
       </div>
 
-      {!isPreview && nowPlayingTrack && (
-        <div className="pointer-events-none fixed inset-x-0 bottom-0 z-30 px-3 pb-[calc(env(safe-area-inset-bottom)+0.65rem)]">
-          <div className="pointer-events-auto mx-auto w-full max-w-[520px] rounded-[1.7rem] border border-white/10 bg-slate-900/90 backdrop-blur-2xl shadow-[0_-20px_60px_rgba(0,0,0,0.65)] p-3">
-            <div className="flex items-center gap-3">
-              <div className="w-12 h-12 rounded-xl overflow-hidden border border-slate-700/80 bg-slate-800 flex-shrink-0">
-                {nowPlayingArtwork ? (
-                  <img src={nowPlayingArtwork} alt={nowPlayingTrack.title} className="w-full h-full object-cover" loading="eager" decoding="async" />
-                ) : (
-                  <div className="w-full h-full bg-slate-800" />
-                )}
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-[10px] uppercase tracking-[0.24em] font-black text-slate-500">Now Playing</p>
-                <p className="text-sm font-black text-white truncate">{nowPlayingTrack.title}</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => handleTogglePlay(nowPlayingTrack)}
-                className="w-12 h-12 rounded-full bg-green-500 text-black flex items-center justify-center active:scale-95 touch-manipulation shadow-lg shadow-green-500/20"
-                aria-label={isPlaying ? 'Pause track' : 'Play track'}
-              >
-                {isPlaying ? <Pause size={20} fill="currentColor" /> : <Play size={20} className="ml-0.5" fill="currentColor" />}
-              </button>
-            </div>
-            <div className="mt-2 flex items-center gap-2">
-              <span className="w-9 text-[10px] text-slate-500 font-bold tabular-nums">{formatTime(currentTime)}</span>
-              <input
-                type="range"
-                min={0}
-                max={progressMax}
-                step={1}
-                value={progressValue}
-                onChange={handleSeek}
-                className="tap-progress w-full"
-                aria-label="Track progress"
-              />
-              <span className="w-9 text-right text-[10px] text-slate-500 font-bold tabular-nums">{formatTime(duration)}</span>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
+        <GlobalNowPlayingBar
+          isPreview={isPreview}
+          audioElementKey={audioElementKey}
+          setAudioElementRef={setAudioElementRef}
+          nowPlayingTrack={nowPlayingTrack}
+          nowPlayingArtwork={nowPlayingArtwork}
+          onAudioEnded={(event) => {
+            clearStallRecoveryTimer();
+            activeTrackRef.current = null;
+            manualPauseRef.current = false;
+            lastTimeUpdateLogSecondRef.current = -1;
+            setIsPlaying(false);
+            setCurrentlyPlayingTrackId(null);
+            setCurrentTime(0);
+            logAudioEvent('ended', event.currentTarget);
+          }}
+          onAudioPlay={(event) => {
+            manualPauseRef.current = false;
+            clearStallRecoveryTimer();
+            setPlaybackError(null);
+            setIsPlaying(true);
+            setMediaSession(toMediaSessionTrack(activeTrackRef.current));
+            logAudioEvent('play', event.currentTarget, { reason: 'audio-event' });
+          }}
+          onAudioPause={(event) => {
+            setIsPlaying(false);
+            setMediaSession(toMediaSessionTrack(activeTrackRef.current));
+            logAudioEvent('pause', event.currentTarget, { reason: manualPauseRef.current ? 'user-pause' : 'audio-event' });
+          }}
+          onAudioStalled={(event) => {
+            logAudioEvent('stalled', event.currentTarget);
+            startStallRecovery('stalled');
+          }}
+          onAudioWaiting={(event) => {
+            logAudioEvent('waiting', event.currentTarget);
+            startStallRecovery('waiting');
+          }}
+          onAudioError={(event) => {
+            const code = event.currentTarget.error?.code || 0;
+            const failingTrack = activeTrackRef.current;
+            const failingUrl = String(event.currentTarget.currentSrc || event.currentTarget.src || '').trim();
+            const noSourceLikeError = code === 4 || (
+              typeof HTMLMediaElement !== 'undefined' &&
+              event.currentTarget.networkState === HTMLMediaElement.NETWORK_NO_SOURCE
+            );
+            console.error('[AUDIO] audio.onerror', {
+              projectId: project.projectId,
+              trackId: failingTrack?.trackId || null,
+              code: code || null,
+              finalCurrentSrc: String(event.currentTarget.currentSrc || '').trim() || null,
+              currentSrc: String(event.currentTarget.currentSrc || '').trim() || null,
+              src: String(event.currentTarget.src || '').trim() || null,
+              attrSrc: String(event.currentTarget.getAttribute('src') || '').trim() || null,
+              readyState: event.currentTarget.readyState,
+              networkState: event.currentTarget.networkState,
+              paused: event.currentTarget.paused
+            });
+            if (failingTrack && failingUrl && noSourceLikeError) {
+              const rebuildSignature = `${failingTrack.trackId}:${normalizeRuntimeAudioUrl(failingUrl)}:${code || 0}`;
+              if (lastOnErrorRebuildSignatureRef.current !== rebuildSignature) {
+                lastOnErrorRebuildSignatureRef.current = rebuildSignature;
+                void probeTrackCorsHeadSupport(failingUrl, failingTrack, 'audio-error')
+                  .then((headResult) => {
+                    const info = getRuntimeUrlInfo(failingUrl);
+                    const missingRangeHeader = headResult.ok && !headResult.rangeHeaderPresent;
+                    const suspiciousMimeType = headResult.ok && Boolean(headResult.contentType) &&
+                      !/^audio\//i.test(headResult.contentType) &&
+                      !/octet-stream/i.test(headResult.contentType);
+                    if (
+                      Boolean(info.origin) &&
+                      !info.sameOrigin &&
+                      (!headResult.ok || missingRangeHeader || suspiciousMimeType)
+                    ) {
+                      markNoCorsFallbackForUrl(failingUrl, failingTrack, 'audio-error-cors-head-incompatible', {
+                        status: headResult.status,
+                        headError: headResult.error || null,
+                        acceptRanges: headResult.acceptRanges || null,
+                        contentType: headResult.contentType || null,
+                        code
+                      });
+                      setPlaybackError('Host missing CORS/Range headers');
+                    }
+                    return rebuildAudioElement('audio.onerror-no-source', {
+                      track: failingTrack,
+                      sourceUrl: failingUrl
+                    });
+                  })
+                  .then((rebuiltAudio) => attachAudioSourceWithFallback(rebuiltAudio, failingUrl, failingTrack, 'error-rebuild'))
+                  .then(() => {
+                    console.warn('[AUDIO] audio.onerror rebuild fallback attached source', {
+                      projectId: project.projectId,
+                      trackId: failingTrack.trackId,
+                      code,
+                      url: failingUrl
+                    });
+                  })
+                  .catch((fallbackError: any) => {
+                    console.error('[AUDIO] audio.onerror rebuild fallback failed', {
+                      projectId: project.projectId,
+                      trackId: failingTrack.trackId,
+                      code,
+                      url: failingUrl,
+                      error: String(fallbackError?.message || fallbackError || 'fallback failed')
+                    });
+                  });
+              }
+            }
+            if (failingTrack && failingUrl) {
+              void probeTrackCorsHeadSupport(failingUrl, failingTrack, 'audio-error').then((headResult) => {
+                if (headResult.ok) return;
+                console.warn('[AUDIO] audio-element cors HEAD failed', {
+                  projectId: project.projectId,
+                  trackId: failingTrack.trackId,
+                  url: failingUrl,
+                  status: headResult.status ?? null,
+                  error: headResult.error || 'HEAD failed'
+                });
+              });
+              void probeTrackAudioUrl(failingUrl, failingTrack, 'audio-error').then((probeResult) => {
+                if (probeResult.ok) return;
+                console.warn('[AUDIO] audio-element source failed', {
+                  projectId: project.projectId,
+                  trackId: failingTrack.trackId,
+                  storageBucket: String(failingTrack.storageBucket || '').trim() || null,
+                  storagePath: String(failingTrack.audioPath || failingTrack.storagePath || '').trim() || null,
+                  status: probeResult.status ?? (probeResult.failureType === 'cors' ? 'CORS' : 'NETWORK'),
+                  failureType: probeResult.failureType || 'http',
+                  url: failingUrl,
+                  error: probeResult.error || probeResult.message
+                });
+              });
+            }
+            logAudioEvent('error', event.currentTarget, { reason: 'audio-element-error', code });
+            if (code === 4 && (isNoCorsFallbackEnabledForUrl(failingUrl) || noSourceLikeError)) {
+              setPlaybackError('Host missing CORS/Range headers');
+            } else {
+              setPlaybackError(`Playback error (code ${code || 'unknown'})`);
+            }
+            startStallRecovery('error');
+          }}
+          onAudioTimeUpdate={(event) => {
+            const next = Number(event.currentTarget.currentTime);
+            const normalized = Number.isFinite(next) ? next : 0;
+            setCurrentTime(normalized);
+            const wholeSeconds = Math.floor(normalized);
+            if (wholeSeconds !== lastTimeUpdateLogSecondRef.current) {
+              lastTimeUpdateLogSecondRef.current = wholeSeconds;
+              logAudioEvent('timeupdate', event.currentTarget);
+            }
+          }}
+          onAudioLoadedMetadata={(event) => {
+            const next = Number(event.currentTarget.duration);
+            setDuration(Number.isFinite(next) ? next : 0);
+            setMediaSession(toMediaSessionTrack(activeTrackRef.current));
+            logAudioEvent('loadedmetadata', event.currentTarget);
+          }}
+          onAudioDurationChange={(event) => {
+            const next = Number(event.currentTarget.duration);
+            setDuration(Number.isFinite(next) ? next : 0);
+            logAudioEvent('durationchange', event.currentTarget);
+          }}
+        />
+      </div>
+    </GlobalPlayerContext.Provider>
   );
 };
 

@@ -152,6 +152,24 @@ const EditorPage: React.FC = () => {
     };
   }, []);
 
+  useEffect(() => {
+    if (typeof Audio === 'undefined') return;
+    const previewAudio = new Audio();
+    previewAudio.preload = 'none';
+    previewAudio.onended = () => {
+      setIsPlayingPreview(false);
+      setPreviewingTrackId(null);
+    };
+    audioPreviewRef.current = previewAudio;
+
+    return () => {
+      previewAudio.pause();
+      previewAudio.src = '';
+      previewAudio.onended = null;
+      audioPreviewRef.current = null;
+    };
+  }, []);
+
   const toSafeNonNegativeNumber = (value: unknown, fallback = 0) => {
     const normalized = Number(value);
     if (!Number.isFinite(normalized) || normalized < 0) {
@@ -1574,7 +1592,6 @@ const EditorPage: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col text-slate-100">
-      <audio ref={audioPreviewRef} onEnded={stopPreview} className="hidden" />
       <input type="file" ref={projectImageInputRef} className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, 'PROJECT_IMAGE')} />
       <input type="file" ref={trackImageInputRef} className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, 'TRACK_IMAGE')} />
       <input type="file" ref={trackAudioInputRef} className="hidden" accept=".mp3,audio/mpeg" multiple={!uploadPerTrackEnabled} onChange={(e) => handleFileUpload(e, 'TRACK_AUDIO')} />
