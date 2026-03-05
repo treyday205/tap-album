@@ -1,6 +1,7 @@
 ﻿import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import multer from 'multer';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import sharp from 'sharp';
@@ -142,6 +143,13 @@ const getSupabaseKeyType = (key) => {
 const SUPABASE_KEY_TYPE = getSupabaseKeyType(SUPABASE_SERVICE_ROLE_KEY);
 
 const ASSET_REF_PREFIX = 'asset:';
+const coverUploadParser = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MAX_IMAGE_BYTES,
+    files: 1
+  }
+});
 
 const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac']);
 const TRACK_AUDIO_EXTENSIONS = new Set(['mp3']);
@@ -2501,6 +2509,136 @@ app.get('/api/projects/:projectId/cover-url', async (req, res) => {
   } catch (err) {
     console.error('Project cover URL fetch failed:', err);
     return res.status(500).json({ message: 'Unable to resolve cover URL.' });
+  }
+});
+
+const handleCoverUploadMultipart = (req, res, next) => {
+  coverUploadParser.single('file')(req, res, (err) => {
+    if (!err) {
+      next();
+      return;
+    }
+    if (err?.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ message: 'Image file too large. Max 10MB.' });
+    }
+    console.error('[COVER_UPLOAD_MULTIPART_FAILED]', {
+      message: String(err?.message || err || 'unknown')
+    });
+    return res.status(400).json({ message: 'Invalid cover upload payload.' });
+  });
+};
+
+app.post('/api/projects/:projectId/cover-upload', handleCoverUploadMultipart, async (req, res) => {
+  const safeProjectId = safeSegment(req.params.projectId);
+  if (!safeProjectId) {
+    return res.status(400).json({ message: 'projectId is required.' });
+  }
+  if (!IS_DEV && !isAdminRequest(req)) {
+    return res.status(401).json({ message: 'Admin token required.' });
+  }
+  const ownerScope = IS_DEV ? ADMIN_OWNER_USER_ID : getAdminOwnerScope(req);
+  if (!ownerScope) {
+    return res.status(401).json({ message: 'Admin owner scope is required.' });
+  }
+  if (!s3Client || !S3_BUCKET) {
+    return res.status(503).json({
+      message: 'R2 storage is required for uploads. Configure S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY.'
+    });
+  }
+
+  const file = req.file;
+  if (!file?.buffer || file.buffer.length === 0) {
+    return res.status(400).json({ message: 'Cover file is required.' });
+  }
+
+  const declaredMime = String(file.mimetype || '').split(';')[0].trim().toLowerCase();
+  const extension = sanitizeExtension(mimeToExt(declaredMime), IMAGE_EXTENSIONS);
+  if (!declaredMime.startsWith('image/') || !extension) {
+    return res.status(400).json({
+      message: 'Unsupported image type. Use jpg, png, webp, gif, or avif.'
+    });
+  }
+  const coverMime = resolveContentType(declaredMime, extension);
+  const key = buildObjectKey({
+    assetKind: 'project-cover',
+    projectId: safeProjectId,
+    extension
+  });
+  const coverRef = createAssetRef(key);
+
+  try {
+    const existing = await query(
+      'SELECT data FROM projects WHERE project_id = $1 LIMIT 1',
+      [safeProjectId]
+    );
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+    const rowOwner = ownerUserIdFromData(existing.rows[0].data);
+    if (rowOwner !== ownerScope) {
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+
+    await s3Client.send(new PutObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+      Body: file.buffer,
+      ContentType: coverMime
+    }));
+
+    const currentData = existing.rows[0].data && typeof existing.rows[0].data === 'object'
+      ? existing.rows[0].data
+      : {};
+    const nextData = {
+      ...currentData,
+      ownerUserId: rowOwner,
+      coverImageUrl: coverRef,
+      coverKey: key,
+      coverMime
+    };
+
+    const updated = await query(
+      `UPDATE projects
+       SET cover_key = $2,
+           cover_mime = $3,
+           cover_image_url = $4,
+           data = $5,
+           updated_at = NOW()
+       WHERE project_id = $1
+       RETURNING *`,
+      [safeProjectId, key, coverMime, coverRef, nextData]
+    );
+    const project = await buildProjectPayload(updated.rows[0], { includeSignedCover: true });
+    const coverSignedUrlReady = Boolean(project.coverKey && project.coverSignedUrl);
+    console.log('ALBUM_COVER_SAVED', safeProjectId, key);
+    if (!IS_DEV) {
+      console.log('[COVER SIGN]', {
+        route: 'cover-upload-fallback',
+        projectId: safeProjectId,
+        hasCoverPath: Boolean(project.coverKey),
+        coverSignedUrlReady
+      });
+    }
+    res.set('Cache-Control', 'no-store');
+    return res.json({
+      success: true,
+      coverPath: project.coverKey || null,
+      coverKey: project.coverKey || null,
+      coverMime: project.coverMime || coverMime,
+      coverUrl: project.coverUrl || null,
+      coverUrlExpiresAt: project.coverUrlExpiresAt || null,
+      coverSignedUrl: project.coverSignedUrl || null,
+      coverSignedUrlReady,
+      project
+    });
+  } catch (err) {
+    console.error('[COVER_UPLOAD_SERVER_FAILED]', {
+      projectId: safeProjectId,
+      key,
+      mime: coverMime,
+      error: String(err?.message || err || 'unknown')
+    });
+    return res.status(500).json({ message: 'Unable to upload project cover.' });
   }
 });
 

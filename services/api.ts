@@ -263,6 +263,124 @@ export const Api = {
         : undefined
     }),
 
+  uploadProjectCoverServer: (
+    projectId: string,
+    file: File,
+    token?: string,
+    onProgress?: (percent: number) => void
+  ): Promise<any> =>
+    new Promise((resolve, reject) => {
+      type UploadError = Error & {
+        status?: number;
+        code?: string;
+        hint?: string;
+        body?: unknown;
+      };
+
+      const buildUploadError = (
+        message: string,
+        extras: Partial<UploadError> = {}
+      ): UploadError => {
+        const err = new Error(message) as UploadError;
+        if (extras.status !== undefined) err.status = extras.status;
+        if (extras.code) err.code = extras.code;
+        if (extras.hint) err.hint = extras.hint;
+        if (extras.body !== undefined) err.body = extras.body;
+        return err;
+      };
+
+      const projectKey = String(projectId || '').trim();
+      if (!projectKey) {
+        reject(buildUploadError('projectId is required.'));
+        return;
+      }
+      if (!(file instanceof File)) {
+        reject(buildUploadError('Cover file is required.'));
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('file', file, file.name || 'cover');
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${API_BASE_URL}/api/projects/${encodeURIComponent(projectKey)}/cover-upload`);
+      xhr.withCredentials = true;
+      if (token) {
+        xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      }
+
+      if (onProgress) {
+        xhr.upload.onprogress = (event) => {
+          if (!event.lengthComputable) return;
+          const percent = Math.round((event.loaded / event.total) * 100);
+          onProgress(Math.min(100, Math.max(0, percent)));
+        };
+      }
+
+      xhr.onload = () => {
+        const payloadText = String(xhr.responseText || '').trim();
+        const payload = (() => {
+          if (!payloadText) return {};
+          try {
+            return JSON.parse(payloadText);
+          } catch {
+            return { message: payloadText };
+          }
+        })();
+
+        if (xhr.status >= 200 && xhr.status < 300) {
+          reportUploadTelemetry({
+            stage: 'cover-upload-server',
+            status: xhr.status,
+            projectId: projectKey,
+            fileName: file.name,
+            size: file.size
+          });
+          resolve(payload);
+          return;
+        }
+
+        reportUploadTelemetry({
+          stage: 'cover-upload-server-failed',
+          status: xhr.status,
+          projectId: projectKey,
+          fileName: file.name,
+          size: file.size,
+          error: String((payload as any)?.message || payloadText || `Upload failed (status ${xhr.status})`)
+        });
+        reject(
+          buildUploadError(
+            String((payload as any)?.message || `Upload failed (status ${xhr.status})`),
+            {
+              status: xhr.status,
+              code: 'COVER_UPLOAD_SERVER_FAILED',
+              body: payload
+            }
+          )
+        );
+      };
+
+      xhr.onerror = () => {
+        reportUploadTelemetry({
+          stage: 'cover-upload-server-failed',
+          status: 0,
+          projectId: projectKey,
+          fileName: file.name,
+          size: file.size,
+          error: 'CORS/Network blocked'
+        });
+        reject(
+          buildUploadError('CORS/Network blocked', {
+            status: 0,
+            code: 'COVER_UPLOAD_SERVER_FAILED',
+            hint: 'CORS/Network blocked'
+          })
+        );
+      };
+
+      xhr.send(formData);
+    }),
+
   getProjectBySlug: (slug: string) =>
     request(`/api/projects/${encodeURIComponent(slug)}`, {
       method: 'GET'

@@ -82,6 +82,8 @@ const EditorPage: React.FC = () => {
   const [uploadingTrackId, setUploadingTrackId] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [coverUploadProgress, setCoverUploadProgress] = useState<number | null>(null);
+  const [coverUploadMode, setCoverUploadMode] = useState<'direct' | 'server' | null>(null);
   const [assetUrls, setAssetUrls] = useState<Record<string, string>>({});
   const signedAssetRequestsRef = useRef(new Set<string>());
   const bankAssetRequestsRef = useRef(new Set<string>());
@@ -700,6 +702,13 @@ const EditorPage: React.FC = () => {
     const message = String(err?.message || '').trim();
     return message || fallback;
   };
+  const isCorsUploadFailure = (err: any) => {
+    const status = Number(err?.status);
+    if (Number.isFinite(status) && status === 0) return true;
+    const hint = String(err?.hint || '').toLowerCase();
+    const message = String(err?.message || '').toLowerCase();
+    return hint.includes('cors/network blocked') || message.includes('cors/network blocked');
+  };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, type: 'PROJECT_IMAGE' | 'TRACK_IMAGE' | 'TRACK_AUDIO') => {
     const inputFiles = e.target.files;
@@ -1003,70 +1012,140 @@ const EditorPage: React.FC = () => {
 
     if (type === 'PROJECT_IMAGE') {
       try {
-        const result = await Api.uploadAsset(file, projectId, { assetKind: 'project-cover' });
-        const assetRef = result?.assetRef || '';
-        const coverKey = String(result?.storagePath || storagePathFromTrackValue(assetRef)).trim();
-        if (!assetRef) {
-          throw new Error('Upload did not return a file URL.');
-        }
-        if (!coverKey) {
-          throw new Error('Upload did not return a cover key.');
-        }
         const adminToken = localStorage.getItem('tap_admin_token') || undefined;
-        const persisted = await Api.updateProjectCover(
-          projectId,
-          {
+        const applyCoverUpdate = (
+          payload: any,
+          fallbackData: {
+            coverKey?: string;
+            coverMime?: string | null;
+            coverUrl?: string;
+            coverRef?: string;
+            updatedAt?: string;
+          } = {}
+        ) => {
+          const resolvedCoverKey = String(
+            payload?.coverKey ||
+            payload?.coverPath ||
+            payload?.project?.coverKey ||
+            fallbackData.coverKey ||
+            ''
+          ).trim();
+          const resolvedCoverMime = String(
+            payload?.coverMime ||
+            payload?.project?.coverMime ||
+            fallbackData.coverMime ||
+            ''
+          ).trim();
+          const resolvedCoverUrl = String(
+            payload?.coverUrl ||
+            payload?.project?.coverUrl ||
+            payload?.project?.coverImageUrl ||
+            fallbackData.coverUrl ||
+            ''
+          ).trim();
+          const resolvedCoverUrlExpiresAtValue = Number(
+            payload?.coverUrlExpiresAt ??
+            payload?.project?.coverUrlExpiresAt
+          );
+          const resolvedCoverUrlExpiresAt = Number.isFinite(resolvedCoverUrlExpiresAtValue)
+            ? resolvedCoverUrlExpiresAtValue
+            : null;
+          const resolvedCoverRef = resolvedCoverKey
+            ? `asset:${resolvedCoverKey}`
+            : String(fallbackData.coverRef || '').trim();
+          const updatedAt = String(
+            payload?.updatedAt ||
+            payload?.project?.updatedAt ||
+            fallbackData.updatedAt ||
+            ''
+          ).trim() || new Date().toISOString();
+
+          handleSaveProject({
+            coverImageUrl: resolvedCoverUrl || resolvedCoverRef || '',
+            coverRef: resolvedCoverRef || null,
+            coverKey: resolvedCoverKey || null,
+            coverMime: resolvedCoverMime || null,
+            coverUrl: resolvedCoverUrl || null,
+            coverUrlExpiresAt: resolvedCoverUrlExpiresAt,
+            updatedAt
+          });
+          if (resolvedCoverRef) {
+            ensureSignedAssets([resolvedCoverRef]);
+          }
+        };
+
+        setCoverUploadMode('direct');
+        setCoverUploadProgress(0);
+
+        try {
+          const result = await Api.uploadAsset(file, projectId, {
+            assetKind: 'project-cover',
+            onProgress: (percent) => {
+              setCoverUploadProgress(percent);
+            }
+          });
+          const assetRef = String(result?.assetRef || '').trim();
+          const coverKey = String(result?.storagePath || storagePathFromTrackValue(assetRef)).trim();
+          if (!assetRef) {
+            throw new Error('Upload did not return a file URL.');
+          }
+          if (!coverKey) {
+            throw new Error('Upload did not return a cover key.');
+          }
+          const persisted = await Api.updateProjectCover(
+            projectId,
+            {
+              coverKey,
+              coverMime: result?.contentType || file.type || undefined
+            },
+            adminToken
+          );
+          const refreshedCover = await Api.getProjectCoverUrl(projectId, adminToken);
+          applyCoverUpdate(refreshedCover, {
             coverKey,
-            coverMime: result?.contentType || file.type || undefined
-          },
-          adminToken
-        );
-
-        const refreshedCover = await Api.getProjectCoverUrl(projectId, adminToken);
-        const refreshedCoverKey = String(refreshedCover?.coverKey || coverKey).trim();
-        const refreshedCoverMime = String(
-          refreshedCover?.coverMime ||
-          persisted?.coverMime ||
-          result?.contentType ||
-          file.type ||
-          ''
-        ).trim();
-        const refreshedCoverUrl = String(
-          refreshedCover?.coverUrl ||
-          persisted?.coverUrl ||
-          persisted?.project?.coverUrl ||
-          ''
-        ).trim();
-        const refreshedCoverExpiresAtValue = Number(
-          refreshedCover?.coverUrlExpiresAt ??
-          persisted?.coverUrlExpiresAt ??
-          persisted?.project?.coverUrlExpiresAt
-        );
-        const refreshedCoverExpiresAt = Number.isFinite(refreshedCoverExpiresAtValue)
-          ? refreshedCoverExpiresAtValue
-          : null;
-        const coverRef = refreshedCoverKey ? `asset:${refreshedCoverKey}` : assetRef;
-
-        handleSaveProject({
-          coverImageUrl: refreshedCoverUrl || coverRef || '',
-          coverRef: coverRef || null,
-          coverKey: refreshedCoverKey || null,
-          coverMime: refreshedCoverMime || null,
-          coverUrl: refreshedCoverUrl || null,
-          coverUrlExpiresAt: refreshedCoverExpiresAt,
-          updatedAt:
-            String(refreshedCover?.updatedAt || persisted?.project?.updatedAt || '').trim() ||
-            new Date().toISOString()
-        });
-        if (coverRef) {
-          ensureSignedAssets([coverRef]);
+            coverMime: String(
+              refreshedCover?.coverMime ||
+              persisted?.coverMime ||
+              result?.contentType ||
+              file.type ||
+              ''
+            ).trim(),
+            coverRef: assetRef,
+            updatedAt: String(refreshedCover?.updatedAt || persisted?.project?.updatedAt || '').trim()
+          });
+          setCoverUploadProgress(100);
+        } catch (directErr: any) {
+          if (!isCorsUploadFailure(directErr)) {
+            throw directErr;
+          }
+          console.warn('[COVER][UPLOAD] direct upload blocked, retrying via server fallback', {
+            projectId,
+            status: Number(directErr?.status || 0)
+          });
+          setCoverUploadMode('server');
+          setCoverUploadProgress(0);
+          const fallbackResult = await Api.uploadProjectCoverServer(
+            projectId,
+            file,
+            adminToken,
+            (percent) => {
+              setCoverUploadProgress(percent);
+            }
+          );
+          applyCoverUpdate(fallbackResult, {
+            coverMime: file.type || null
+          });
+          setCoverUploadProgress(100);
         }
+
         setUploadError(null);
       } catch (err: any) {
         const message = getUploadErrorMessage(err);
         setUploadError(message);
         alert(message);
       } finally {
+        setCoverUploadMode(null);
+        setCoverUploadProgress(null);
         e.target.value = '';
       }
       return;
@@ -1569,6 +1648,11 @@ const EditorPage: React.FC = () => {
                       {uploadError && (
                         <div className="bg-red-500/10 border border-red-500/30 text-red-300 text-[10px] font-black uppercase tracking-widest rounded-2xl px-4 py-3">
                           Upload error: {uploadError}
+                        </div>
+                      )}
+                      {coverUploadProgress !== null && (
+                        <div className="bg-cyan-500/10 border border-cyan-500/30 text-cyan-200 text-[10px] font-black uppercase tracking-widest rounded-2xl px-4 py-3">
+                          Cover upload {coverUploadMode === 'server' ? '(Server Fallback)' : '(Direct)'}: {Math.max(0, Math.min(100, Math.round(coverUploadProgress)))}%
                         </div>
                       )}
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
