@@ -15,7 +15,7 @@ import {
   X,
   Youtube
 } from 'lucide-react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import {
   DEFAULT_MOCK_ALBUM_SLUG,
   fetchAlbumBySlug,
@@ -24,6 +24,7 @@ import {
   type AlbumPayload
 } from '../services/albumData';
 import { useAlbumAudioPlayer } from '../services/albumAudioPlayer';
+import { Api } from '../services/api';
 
 type PageState = 'loading' | 'ready' | 'not-found';
 type AlbumTab = 'album' | 'merch' | 'artist';
@@ -192,8 +193,24 @@ const getPrimaryDuration = (duration: number, trackDuration?: number) => {
   return 0;
 };
 
+const AUTH_TOKEN_KEY = 'tap_auth_token';
+const scopedAuthTokenKey = (projectId: string) => `${AUTH_TOKEN_KEY}_${projectId}`;
+const normalizeProjectId = (value?: string | null) => String(value || '').trim();
+
+const getStoredAuthToken = (projectId?: string | null) => {
+  const normalizedProjectId = normalizeProjectId(projectId);
+  if (normalizedProjectId) {
+    const scopedToken = localStorage.getItem(scopedAuthTokenKey(normalizedProjectId));
+    if (scopedToken) return scopedToken;
+  }
+  return localStorage.getItem(AUTH_TOKEN_KEY);
+};
+
+const toSecureEntryPath = (slug: string) => `/${encodeURIComponent(slug)}`;
+
 const AlbumPlayerPage: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
+  const navigate = useNavigate();
   const [album, setAlbum] = useState<AlbumPayload | null>(null);
   const [pageState, setPageState] = useState<PageState>('loading');
   const [activeTab, setActiveTab] = useState<AlbumTab>('album');
@@ -231,6 +248,30 @@ const AlbumPlayerPage: React.FC = () => {
 
     const run = async () => {
       try {
+        const projectResponse = await Api.getProjectBySlug(normalizedSlug);
+        if (cancelled) return;
+        const gateEnabled = projectResponse?.project?.emailGateEnabled ?? true;
+        if (gateEnabled) {
+          const projectId = normalizeProjectId(projectResponse?.project?.projectId);
+          const token = getStoredAuthToken(projectId);
+          if (!projectId || !token) {
+            navigate(toSecureEntryPath(normalizedSlug), { replace: true });
+            return;
+          }
+          try {
+            const status = await Api.getAccessStatus(projectId, token);
+            if (cancelled) return;
+            if (!status?.verified) {
+              navigate(toSecureEntryPath(normalizedSlug), { replace: true });
+              return;
+            }
+          } catch {
+            if (cancelled) return;
+            navigate(toSecureEntryPath(normalizedSlug), { replace: true });
+            return;
+          }
+        }
+
         const payload = await fetchAlbumBySlug(normalizedSlug);
         if (cancelled) return;
         setAlbum(payload);
@@ -247,7 +288,7 @@ const AlbumPlayerPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [slug]);
+  }, [slug, navigate]);
 
   useEffect(() => {
     if (!album) return;

@@ -941,18 +941,26 @@ const issueVerifiedAccessToken = async (projectId, email) => {
     throw new Error('projectId and email are required.');
   }
   const access = await getAccessRecord(projectId, email);
-  await query(
-    'UPDATE access_records SET verified = true, verified_at = NOW(), updated_at = NOW() WHERE id = $1',
+  const updated = await query(
+    `UPDATE access_records
+     SET verified = true,
+         verified_at = COALESCE(verified_at, NOW()),
+         unlocked = true,
+         unlocked_at = COALESCE(unlocked_at, NOW()),
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING *`,
     [access.id]
   );
+  const resolvedAccess = updated.rows[0] || access;
   const token = jwt.sign({ email: access.email }, JWT_SECRET, { expiresIn: '365d' });
   return {
     success: true,
     token,
-    email: access.email,
-    projectId: access.project_id,
-    remaining: access.remaining,
-    unlocked: access.unlocked
+    email: resolvedAccess.email,
+    projectId: resolvedAccess.project_id,
+    remaining: resolvedAccess.remaining,
+    unlocked: Boolean(resolvedAccess.unlocked)
   };
 };
 
@@ -1710,10 +1718,12 @@ app.post('/api/assets/sign', async (req, res) => {
       const email = getTokenEmail(req);
       if (email) {
         const accessResult = await query(
-          'SELECT unlocked FROM access_records WHERE project_id = $1 AND email = $2 LIMIT 1',
+          'SELECT unlocked, verified FROM access_records WHERE project_id = $1 AND email = $2 LIMIT 1',
           [safeProjectId, normalizeEmail(email)]
         );
-        isUnlocked = accessResult.rows.length > 0 && Boolean(accessResult.rows[0].unlocked);
+        isUnlocked =
+          accessResult.rows.length > 0 &&
+          (Boolean(accessResult.rows[0].unlocked) || Boolean(accessResult.rows[0].verified));
       }
     } else {
       isUnlocked = true;

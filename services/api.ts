@@ -1,18 +1,4 @@
-const normalizeApiBase = (value: unknown): string => {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  if (!/^https?:\/\//i.test(raw)) {
-    return `http://${raw}`.replace(/\/+$/g, '');
-  }
-  return raw.replace(/\/+$/g, '');
-};
-
-const API = normalizeApiBase(import.meta.env?.VITE_API_URL);
-const API_BASE_URL =
-  API ||
-  (typeof window !== 'undefined' && window.location?.origin
-    ? window.location.origin
-    : '');
+const API_BASE_URL = '';
 
 const reportUploadTelemetry = async (payload: Record<string, any>) => {
   try {

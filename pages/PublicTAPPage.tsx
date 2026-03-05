@@ -21,7 +21,6 @@ import {
   type TrackStorageConfig
 } from '../services/trackAudio';
 import {
-  buildSupabaseEmailRedirectUrl,
   hasSupabaseAuthUrlState,
   isSupabaseAuthEnabled,
   supabaseAuthClient
@@ -720,7 +719,7 @@ const PublicTAPPage: React.FC = () => {
         const status = await Api.getAccessStatus(project.projectId, token);
         if (canceled) return;
         setRemaining(status.remaining ?? null);
-        if (status.unlocked) {
+        if (status.verified) {
           setIsUnlocked(true);
         } else {
           setIsUnlocked(false);
@@ -1053,19 +1052,14 @@ const PublicTAPPage: React.FC = () => {
     try {
       const status = await Api.getAccessStatus(effectiveProjectId, token);
       setRemaining(status.remaining ?? null);
-      if (status?.unlocked) {
+      if (status?.verified) {
         setIsUnlocked(true);
         setShowModal(false);
         resetModal();
         return;
       }
-      if (!status?.verified) {
-        resetAuth(effectiveProjectId);
-        openModal();
-        return;
-      }
-      setStep('pin');
-      await handleIssuePin(token, effectiveProjectId);
+      resetAuth(effectiveProjectId);
+      openModal();
     } catch {
       resetAuth(effectiveProjectId);
       openModal();
@@ -1113,25 +1107,8 @@ const PublicTAPPage: React.FC = () => {
           projectId: project.projectId,
           slug: slugValue,
           email: normalizedEmail,
-          via: isSupabaseAuthEnabled && supabaseAuthClient ? 'supabase' : 'backend'
+          via: 'backend'
         });
-      }
-      if (isSupabaseAuthEnabled && supabaseAuthClient) {
-        const redirectTo = buildSupabaseEmailRedirectUrl(slugValue, project.projectId);
-        const { error: otpError } = await supabaseAuthClient.auth.signInWithOtp({
-          email: normalizedEmail,
-          options: {
-            shouldCreateUser: true,
-            emailRedirectTo: redirectTo
-          }
-        });
-        if (otpError) {
-          throw otpError;
-        }
-        setVerificationId('supabase');
-        setDevCode(null);
-        setStep('code');
-        return;
       }
 
       const response = await Api.requestMagicLink(normalizedEmail, project.projectId, slugValue);
@@ -1172,8 +1149,11 @@ const PublicTAPPage: React.FC = () => {
       }
       const response = await Api.verifyMagicLink(id, code.trim());
       persistAuthPayload(response);
-      setStep('pin');
-      await handleIssuePin(response.token, response.projectId);
+      setIsUnlocked(true);
+      if (project) {
+        StorageService.logEvent(project.projectId, EventType.ACTIVATION_SUCCESS, 'Email Verified');
+      }
+      closeModal();
     } catch (err: any) {
       setError(err.message || 'Verification failed.');
     } finally {
@@ -1217,8 +1197,11 @@ const PublicTAPPage: React.FC = () => {
     if (!appToken) {
       throw new Error('Could not create app session.');
     }
-    setStep('pin');
-    await handleIssuePin(appToken, projectId);
+    setIsUnlocked(true);
+    if (project) {
+      StorageService.logEvent(project.projectId, EventType.ACTIVATION_SUCCESS, 'Email Verified');
+    }
+    closeModal();
   };
 
   const handleVerifyMagic = async (e: React.FormEvent) => {
@@ -1226,18 +1209,6 @@ const PublicTAPPage: React.FC = () => {
     const effectiveProjectId = project?.projectId || routeProjectId;
     if (!effectiveProjectId) {
       setError('Missing project ID for verification.');
-      return;
-    }
-    if (isSupabaseAuthEnabled && supabaseAuthClient) {
-      setIsVerifying(true);
-      setError(null);
-      try {
-        await performSupabaseOtpVerify(effectiveProjectId, magicCode);
-      } catch (err: any) {
-        setError(err.message || 'Verification failed.');
-      } finally {
-        setIsVerifying(false);
-      }
       return;
     }
     if (!verificationId) return;
