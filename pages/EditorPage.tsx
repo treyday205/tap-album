@@ -93,6 +93,7 @@ const EditorPage: React.FC = () => {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [links, setLinks] = useState<ProjectLink[]>([]);
   const [isLoadingProject, setIsLoadingProject] = useState(true);
+  const [isHydratingRemoteProject, setIsHydratingRemoteProject] = useState(false);
   const [activeTab, setActiveTab] = useState<'general' | 'tracks' | 'links' | 'security'>('general');
   const [isSaved, setIsSaved] = useState(true);
   const [showMobilePreview, setShowMobilePreview] = useState(true);
@@ -207,18 +208,109 @@ const EditorPage: React.FC = () => {
   const effectiveProjectSecurityStats = projectSecurityStats || fallbackProjectSecurityStats;
 
   useEffect(() => {
-    if (projectId) {
-      setIsLoadingProject(true);
-      const p = StorageService.getProjectById(projectId);
-      if (p) {
-        setProject(p);
-        setTracks(StorageService.getTracks(projectId));
-        setLinks(StorageService.getLinks(projectId));
-      } else {
-        navigate('/control-admin/dashboard');
-      }
+    if (!projectId) return;
+
+    let cancelled = false;
+    setIsLoadingProject(true);
+    const localProject = StorageService.getProjectById(projectId);
+    if (!localProject) {
+      navigate('/control-admin/dashboard');
       setIsLoadingProject(false);
+      return;
     }
+
+    const localTracks = StorageService.getTracks(projectId);
+    setProject(localProject);
+    setTracks(localTracks);
+    setLinks(StorageService.getLinks(projectId));
+
+    const hydrateFromServer = async () => {
+      const normalizedSlug = String(localProject.slug || '').trim();
+      if (!normalizedSlug) {
+        if (!cancelled) {
+          setIsLoadingProject(false);
+        }
+        return;
+      }
+
+      setIsHydratingRemoteProject(true);
+      try {
+        const response = await Api.getProjectBySlug(normalizedSlug);
+        if (cancelled) return;
+
+        const remoteProjectRaw = response?.project || null;
+        const normalizedProject = remoteProjectRaw
+          ? {
+              ...localProject,
+              ...remoteProjectRaw,
+              coverImageUrl: String(remoteProjectRaw.coverUrl || remoteProjectRaw.coverImageUrl || '').trim()
+            }
+          : localProject;
+
+        const remoteTracks = Array.isArray(response?.tracks)
+          ? response.tracks.map((item: any, index: number) => {
+              const normalizedAudioUrl = String(item?.audioUrl || item?.audio_url || '').trim();
+              const normalizedTrackUrl = String(item?.trackUrl || item?.track_url || normalizedAudioUrl || item?.mp3Url || '').trim();
+              const normalizedMp3Url = String(item?.mp3Url || item?.mp3_url || normalizedTrackUrl || normalizedAudioUrl || '').trim();
+              const normalizedSpotifyUrl = String(item?.spotifyUrl || item?.spotify_url || '').trim();
+              const maybeSpotifyUrl = normalizedSpotifyUrl ||
+                (/(spotify\.com|p\.scdn\.co)/i.test(normalizedTrackUrl)
+                  ? normalizedTrackUrl
+                  : /(spotify\.com|p\.scdn\.co)/i.test(normalizedMp3Url)
+                    ? normalizedMp3Url
+                    : '');
+              const trackNoValue = Number(item?.trackNo ?? item?.track_no ?? item?.sortOrder ?? item?.sort_order ?? index + 1);
+              const sortOrderValue = Number(item?.sortOrder ?? item?.sort_order ?? trackNoValue);
+              return {
+                ...item,
+                trackId: String(item?.trackId || item?.track_id || '').trim(),
+                projectId: String(item?.projectId || item?.project_id || projectId).trim(),
+                title: String(item?.title || 'Untitled').trim() || 'Untitled',
+                mp3Url: normalizedMp3Url,
+                trackUrl: normalizedTrackUrl,
+                audioUrl: normalizedAudioUrl || normalizedTrackUrl || normalizedMp3Url,
+                spotifyUrl: maybeSpotifyUrl,
+                artworkUrl: String(item?.artworkUrl || item?.artwork_url || '').trim(),
+                audioPath: String(item?.audioPath || item?.audio_path || item?.storagePath || '').trim(),
+                storagePath: String(item?.storagePath || item?.audioPath || item?.audio_path || '').trim(),
+                storageBucket: String(item?.storageBucket || item?.storage_bucket || '').trim(),
+                clearAudioOnSync: false,
+                trackNo: Number.isFinite(trackNoValue) ? Math.max(1, Math.floor(trackNoValue)) : index + 1,
+                sortOrder: Number.isFinite(sortOrderValue) ? Math.max(0, Math.floor(sortOrderValue)) : index + 1,
+                createdAt: String(item?.createdAt || item?.created_at || new Date().toISOString())
+              } as Track;
+            })
+              .filter((item: Track) => item.trackId.length > 0)
+          : localTracks;
+
+        setProject(normalizedProject);
+        setTracks(remoteTracks);
+        StorageService.saveProject(normalizedProject);
+
+        const remoteTrackIds = new Set(remoteTracks.map((item) => item.trackId));
+        StorageService.getTracks(projectId).forEach((item) => {
+          if (!remoteTrackIds.has(item.trackId)) {
+            StorageService.deleteTrack(item.trackId);
+          }
+        });
+        remoteTracks.forEach((item) => StorageService.saveTrack(item));
+      } catch (err) {
+        if (import.meta.env.DEV) {
+          console.warn('[DEV] editor remote hydrate failed; using local track cache', err);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsHydratingRemoteProject(false);
+          setIsLoadingProject(false);
+        }
+      }
+    };
+
+    void hydrateFromServer();
+
+    return () => {
+      cancelled = true;
+    };
   }, [projectId, navigate]);
 
   useEffect(() => {
@@ -600,6 +692,50 @@ const EditorPage: React.FC = () => {
   const storagePathFromTrackValue = (value: string | undefined | null) =>
     deriveTrackStorageTarget(value)?.storagePath || '';
 
+  const buildSyncTracksPayload = useCallback((sourceTracks: Track[]) => {
+    return sourceTracks.map((track, index) => {
+      const normalizedTrackUrl = String(track.trackUrl || '').trim();
+      const normalizedAudioUrl = String(track.audioUrl || '').trim();
+      const normalizedMp3Url = String(track.mp3Url || '').trim();
+      const normalizedArtworkUrl = String(track.artworkUrl || '').trim();
+      const normalizedStoragePath = String(
+        track.audioPath ||
+        track.storagePath ||
+        storagePathFromTrackValue(normalizedMp3Url) ||
+        storagePathFromTrackValue(normalizedTrackUrl) ||
+        storagePathFromTrackValue(normalizedAudioUrl) ||
+        ''
+      ).trim();
+      const normalizedSpotifyUrl = String(track.spotifyUrl || '').trim();
+      const fallbackSpotifyUrl = /(spotify\.com|p\.scdn\.co)/i.test(normalizedTrackUrl)
+        ? normalizedTrackUrl
+        : /(spotify\.com|p\.scdn\.co)/i.test(normalizedMp3Url)
+          ? normalizedMp3Url
+          : '';
+      const trackNoValue = Number(track.trackNo ?? track.sortOrder ?? index + 1);
+      const sortOrderValue = Number(track.sortOrder ?? track.trackNo ?? index + 1);
+
+      return {
+        trackId: String(track.trackId || '').trim(),
+        projectId: String(track.projectId || projectId || '').trim(),
+        title: String(track.title || 'Untitled').trim() || 'Untitled',
+        trackNo: Number.isFinite(trackNoValue) ? Math.max(1, Math.floor(trackNoValue)) : index + 1,
+        sortOrder: Number.isFinite(sortOrderValue) ? Math.max(0, Math.floor(sortOrderValue)) : index + 1,
+        mp3Url: normalizedMp3Url,
+        trackUrl: normalizedTrackUrl,
+        audioUrl: normalizedAudioUrl,
+        spotifyUrl: normalizedSpotifyUrl || fallbackSpotifyUrl,
+        artworkUrl: normalizedArtworkUrl,
+        cover: normalizedArtworkUrl,
+        audioPath: normalizedStoragePath,
+        storagePath: normalizedStoragePath,
+        storageBucket: String(track.storageBucket || '').trim(),
+        audioKey: String(track.audioKey || '').trim(),
+        clearAudioOnSync: Boolean(track.clearAudioOnSync)
+      };
+    }).filter((track) => track.trackId.length > 0);
+  }, [projectId]);
+
   useEffect(() => {
     if (!project) return;
     const values = [
@@ -619,13 +755,29 @@ const EditorPage: React.FC = () => {
   }, [project, tracks, syncTick]);
 
   useEffect(() => {
-    if (!project) return;
+    if (!project || isLoadingProject || isHydratingRemoteProject) return;
     if (syncTimeoutRef.current) {
       window.clearTimeout(syncTimeoutRef.current);
     }
     syncTimeoutRef.current = window.setTimeout(() => {
       const adminToken = localStorage.getItem('tap_admin_token') || undefined;
-      Api.syncProject(project, tracks, adminToken)
+      const syncTracks = buildSyncTracksPayload(tracks);
+      if (import.meta.env.DEV) {
+        console.log('[DEV] editor sync payload', {
+          projectId: project.projectId,
+          slug: project.slug,
+          trackCount: syncTracks.length,
+          trackUrlSummary: syncTracks.map((item) => ({
+            trackId: item.trackId,
+            hasTrackUrl: Boolean(String(item.trackUrl || '').trim()),
+            hasAudioUrl: Boolean(String(item.audioUrl || '').trim()),
+            hasMp3Url: Boolean(String(item.mp3Url || '').trim()),
+            hasArtwork: Boolean(String(item.artworkUrl || '').trim()),
+            clearAudioOnSync: Boolean(item.clearAudioOnSync)
+          }))
+        });
+      }
+      Api.syncProject(project, syncTracks, adminToken)
         .then(() => setSyncTick((tick) => tick + 1))
         .catch((err: any) => {
           const message = String(err?.message || '');
@@ -645,7 +797,7 @@ const EditorPage: React.FC = () => {
         window.clearTimeout(syncTimeoutRef.current);
       }
     };
-  }, [project, tracks, navigate]);
+  }, [project, tracks, navigate, isLoadingProject, isHydratingRemoteProject, buildSyncTracksPayload]);
 
   const handleSaveProject = (updates: Partial<Project>) => {
     if (project) {
@@ -1265,7 +1417,8 @@ const EditorPage: React.FC = () => {
       storageBucket: '',
       audioUrl: '',
       audioPath: '',
-      storagePath: ''
+      storagePath: '',
+      clearAudioOnSync: true
     });
     delete signedTrackAudioUrlsRef.current[id];
     showToast('Track MP3 removed');
@@ -1309,6 +1462,21 @@ const EditorPage: React.FC = () => {
       normalizedUpdates.storagePath = normalizedAudioPath || normalizedUpdates.storagePath || '';
       if (!normalizedAudioPath) {
         normalizedUpdates.storageBucket = '';
+      }
+    }
+
+    const hasExplicitClearAudioFlag = Object.prototype.hasOwnProperty.call(updates, 'clearAudioOnSync');
+    if (!hasExplicitClearAudioFlag) {
+      const hasAudioSourceValue = [
+        normalizedUpdates.audioPath,
+        normalizedUpdates.storagePath,
+        normalizedUpdates.audioUrl,
+        normalizedUpdates.trackUrl,
+        normalizedUpdates.mp3Url,
+        normalizedUpdates.audioKey
+      ].some((value) => String(value || '').trim().length > 0);
+      if (hasAudioSourceValue) {
+        normalizedUpdates.clearAudioOnSync = false;
       }
     }
 

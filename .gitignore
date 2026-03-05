@@ -9,6 +9,7 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 cloudflared.exe
+scripts/.track-url-persistence-state.json
 
 node_modules
 dist

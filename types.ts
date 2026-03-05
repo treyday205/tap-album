@@ -66,6 +66,7 @@ export interface Track {
   projectId: string;
   title: string;
   mp3Url: string;
+  spotifyUrl?: string;
   trackUrl?: string;
   audioKey?: string | null;
   storageBucket?: string;
@@ -73,6 +74,7 @@ export interface Track {
   audioUrlExpiresAt?: number | null;
   audioPath?: string;
   storagePath?: string;
+  clearAudioOnSync?: boolean;
   trackNo?: number;
   artworkUrl?: string;
   sortOrder: number;

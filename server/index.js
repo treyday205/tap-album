@@ -1045,6 +1045,42 @@ const normalizeTrackAudioUrl = (value, fallback = '') => {
   if (isAssetRef(legacy)) return null;
   return legacy;
 };
+const isPlainObject = (value) =>
+  Boolean(value) &&
+  typeof value === 'object' &&
+  !Array.isArray(value) &&
+  Object.prototype.toString.call(value) === '[object Object]';
+const mergeProjectDataPatch = (existing, patch) => {
+  const base = isPlainObject(existing) ? existing : {};
+  const nextPatch = isPlainObject(patch) ? patch : {};
+  const result = { ...base };
+
+  for (const [key, incomingValue] of Object.entries(nextPatch)) {
+    if (incomingValue === undefined) continue;
+    const currentValue = result[key];
+    if (isPlainObject(currentValue) && isPlainObject(incomingValue)) {
+      result[key] = mergeProjectDataPatch(currentValue, incomingValue);
+      continue;
+    }
+    result[key] = incomingValue;
+  }
+
+  return result;
+};
+const hasTrackUrlClearIntent = (track) =>
+  Boolean(
+    track?.clearAudioOnSync ||
+    track?.clearAudioUrl ||
+    track?.clearTrackUrl ||
+    track?.clearUrl
+  );
+const getExternalTrackUrlFromRow = (row) => {
+  const mp3Value = String(row?.mp3_url || '').trim();
+  if (isAssetRef(mp3Value)) {
+    return '';
+  }
+  return String(normalizeTrackAudioUrl(row?.audio_url, mp3Value) || '').trim();
+};
 const ownerUserIdFromData = (data) => {
   const projectData = data && typeof data === 'object' ? data : {};
   return normalizeOwnerUserId(projectData.ownerUserId, ADMIN_OWNER_USER_ID);
@@ -2925,11 +2961,10 @@ app.post('/api/projects/sync', async (req, res) => {
     const existingData = existing.rows[0].data && typeof existing.rows[0].data === 'object'
       ? existing.rows[0].data
       : {};
-    const payload = {
-      ...existingData,
-      ...project,
+    const payload = mergeProjectDataPatch(existingData, {
+      ...(project || {}),
       ownerUserId: ownerScope
-    };
+    });
     const resetSecurity = Boolean(payload.resetSecurity);
     delete payload.resetSecurity;
     const normalizedSlug = String(payload.slug || '').trim();
@@ -2995,14 +3030,30 @@ app.post('/api/projects/sync', async (req, res) => {
       });
     }
 
-    await client.query('DELETE FROM tracks WHERE project_id = $1', [payload.projectId]);
+    const existingTracksResult = await client.query(
+      'SELECT * FROM tracks WHERE project_id = $1',
+      [payload.projectId]
+    );
+    const existingTracksById = new Map(
+      existingTracksResult.rows.map((row) => [String(row.track_id || '').trim(), row])
+    );
 
-    const trackRows = Array.isArray(tracks) ? tracks : [];
+    const incomingTrackRows = Array.isArray(tracks) ? tracks : null;
+    const trackRows = incomingTrackRows || [];
+    const incomingTrackIds = new Set();
+    const explicitTrackReset = Boolean(
+      req.body?.clearTracks ||
+      req.body?.replaceTracks ||
+      req.body?.forceReplaceTracks
+    );
+
     for (let index = 0; index < trackRows.length; index += 1) {
       const track = trackRows[index] || {};
       const trackId = String(track.trackId || '').trim();
       if (!trackId) continue;
+      incomingTrackIds.add(trackId);
 
+      const existingTrackRow = existingTracksById.get(trackId) || null;
       const trackNoValue = Number(track.trackNo ?? track.sortOrder ?? index + 1);
       const trackNo = Number.isFinite(trackNoValue)
         ? Math.max(1, Math.floor(trackNoValue))
@@ -3011,28 +3062,119 @@ app.post('/api/projects/sync', async (req, res) => {
       const sortOrder = Number.isFinite(sortOrderValue)
         ? Math.max(0, Math.floor(sortOrderValue))
         : trackNo;
-      const rawAudioPath = track.audioPath ?? track.audio_path ?? track.storagePath ?? track.audioKey;
-      const audioKey = normalizeTrackStoragePath(rawAudioPath, track.mp3Url);
-      const rawTrackUrl = String(track.trackUrl || track.mp3Url || '').trim();
-      const externalTrackUrl = rawTrackUrl && !isAssetRef(rawTrackUrl) ? rawTrackUrl : '';
-      const mp3Url = audioKey ? createAssetRef(audioKey) : externalTrackUrl || null;
+
+      const rawAudioPath =
+        track.audioPath ??
+        track.audio_path ??
+        track.storagePath ??
+        track.audioKey;
+      const requestedAudioKey = normalizeTrackStoragePath(
+        rawAudioPath,
+        track.audioKey ??
+          track.audio_key ??
+          track.mp3Url ??
+          track.mp3_url ??
+          track.trackUrl ??
+          track.track_url ??
+          track.audioUrl ??
+          track.audio_url ??
+          track.spotifyUrl ??
+          track.spotify_url
+      );
+      const existingAudioKey = normalizeTrackStoragePath(
+        existingTrackRow?.audio_key,
+        existingTrackRow?.audio_path || existingTrackRow?.storage_path || existingTrackRow?.mp3_url
+      );
+      const explicitTrackUrlClear = hasTrackUrlClearIntent(track);
+      const finalAudioKey = String(
+        requestedAudioKey || (explicitTrackUrlClear ? '' : existingAudioKey || '')
+      ).trim();
+      const hasAudioKey = Boolean(finalAudioKey);
+      const requestedTrackUrl = normalizeTrackAudioUrl(
+        track.trackUrl ??
+          track.track_url ??
+          track.audioUrl ??
+          track.audio_url ??
+          track.mp3Url ??
+          track.mp3_url ??
+          track.spotifyUrl ??
+          track.spotify_url,
+        ''
+      );
+      const requestedExternalTrackUrl = String(requestedTrackUrl || '').trim();
+      const existingExternalTrackUrl = getExternalTrackUrlFromRow(existingTrackRow);
+      let externalTrackUrl = '';
+      if (!hasAudioKey) {
+        if (requestedExternalTrackUrl && !isAssetRef(requestedExternalTrackUrl)) {
+          externalTrackUrl = requestedExternalTrackUrl;
+        } else if (!explicitTrackUrlClear) {
+          externalTrackUrl = existingExternalTrackUrl;
+          if (!requestedExternalTrackUrl && existingExternalTrackUrl && IS_DEV) {
+            console.log('[DEV][SYNC_GUARD] preserved existing track URL', {
+              projectId: payload.projectId,
+              trackId,
+              reason: 'empty-url-payload'
+            });
+          }
+        }
+      }
+
+      const mp3Url = hasAudioKey
+        ? createAssetRef(finalAudioKey)
+        : externalTrackUrl || null;
+      const audioUrl = hasAudioKey ? null : externalTrackUrl || null;
+      const artworkUrl = String(track.artworkUrl || track.cover || '').trim() ||
+        String(existingTrackRow?.artwork_url || '').trim() ||
+        null;
 
       await client.query(
-        `INSERT INTO tracks (track_id, project_id, title, mp3_url, artwork_url, sort_order, track_no, audio_key, storage_path, audio_path, audio_url, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NOW())`,
+        `
+        INSERT INTO tracks (track_id, project_id, title, mp3_url, artwork_url, sort_order, track_no, audio_key, storage_path, audio_path, audio_url, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+        ON CONFLICT (track_id) DO UPDATE
+        SET project_id = EXCLUDED.project_id,
+            title = EXCLUDED.title,
+            mp3_url = EXCLUDED.mp3_url,
+            artwork_url = EXCLUDED.artwork_url,
+            sort_order = EXCLUDED.sort_order,
+            track_no = EXCLUDED.track_no,
+            audio_key = EXCLUDED.audio_key,
+            storage_path = EXCLUDED.storage_path,
+            audio_path = EXCLUDED.audio_path,
+            audio_url = EXCLUDED.audio_url,
+            updated_at = NOW()
+        `,
         [
           trackId,
           payload.projectId,
-          track.title || 'Untitled',
+          String(track.title || 'Untitled').trim() || 'Untitled',
           mp3Url,
-          track.artworkUrl || null,
+          artworkUrl,
           sortOrder,
           trackNo,
-          audioKey,
-          audioKey,
-          audioKey
+          finalAudioKey || null,
+          finalAudioKey || null,
+          finalAudioKey || null,
+          audioUrl
         ]
       );
+    }
+
+    if (incomingTrackRows) {
+      const persistedTrackIds = Array.from(incomingTrackIds);
+      if (persistedTrackIds.length > 0) {
+        await client.query(
+          'DELETE FROM tracks WHERE project_id = $1 AND NOT (track_id = ANY($2::text[]))',
+          [payload.projectId, persistedTrackIds]
+        );
+      } else if (explicitTrackReset) {
+        await client.query('DELETE FROM tracks WHERE project_id = $1', [payload.projectId]);
+      } else if (existingTracksById.size > 0) {
+        console.log('[SYNC_GUARD] skipped destructive track wipe for empty track payload', {
+          projectId: payload.projectId,
+          existingTracks: existingTracksById.size
+        });
+      }
     }
 
     await client.query('COMMIT');
@@ -3051,7 +3193,8 @@ app.post('/api/projects/sync', async (req, res) => {
       console.log('[DEV] project sync', {
         projectId: payload.projectId,
         slug: normalizedSlug,
-        tracks: trackRows.length
+        tracks: trackRows.length,
+        trackPersistence: 'postgres.tracks'
       });
     }
 
@@ -3189,7 +3332,13 @@ app.get('/api/projects/:slug', async (req, res) => {
       console.log('[DEV] project fetch', {
         slug,
         projectId: row.project_id,
-        tracks: tracks.length
+        tracks: tracks.length,
+        trackUrlPresence: tracks.map((track) => ({
+          trackId: track.trackId,
+          hasTrackUrl: Boolean(String(track.trackUrl || '').trim()),
+          hasAudioUrl: Boolean(String(track.audioUrl || '').trim()),
+          hasMp3Url: Boolean(String(track.mp3Url || '').trim())
+        }))
       });
 
       const suspectUrls = [

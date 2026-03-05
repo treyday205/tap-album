@@ -9,7 +9,9 @@
     "build": "vite build",
     "prestart": "node scripts/ensure-dist.cjs",
     "start": "node server/index.js",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:track-url-persistence": "node scripts/test-track-url-persistence.cjs",
+    "test:login-track-url-persistence": "node scripts/test-login-track-url-persistence.cjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.758.0",
