@@ -2,6 +2,7 @@ import React, { useEffect, Suspense, lazy, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { StorageService } from './services/storage';
 import { API_BASE_URL } from './services/api';
+import { AlbumAudioPlayerProvider } from './services/albumAudioPlayer';
 
 const LandingPage = lazy(() => import('./pages/LandingPage'));
 const DashboardPage = lazy(() => import('./pages/DashboardPage'));
@@ -10,6 +11,7 @@ const PublicTAPPage = lazy(() => import('./pages/PublicTAPPage'));
 const PublicTAPPagePerf = lazy(() => import('./pages/PublicTAPPagePerf'));
 const LoginPage = lazy(() => import('./pages/LoginPage'));
 const WalletPage = lazy(() => import('./pages/WalletPage'));
+const AlbumPlayerPage = lazy(() => import('./pages/AlbumPlayerPage'));
 const ADMIN_ENTRY_PATH = '/control-admin';
 const ADMIN_DASHBOARD_PATH = '/control-admin/dashboard';
 const ADMIN_EDITOR_BASE_PATH = '/control-admin/dashboard/edit';
@@ -147,48 +149,53 @@ const App: React.FC = () => {
 
   return (
     <BrowserRouter>
-      <div className="min-h-screen bg-slate-950 text-slate-50 selection:bg-green-500/30">
-        <Suspense fallback={<RouteFallback />}>
-          <Routes>
-            {/* Public Marketing Entry (Root) */}
-            <Route path="/" element={<RootEntryRoute />} />
-            <Route path="/features" element={<FeaturesRoute />} />
+      <AlbumAudioPlayerProvider>
+        <div className="min-h-screen bg-slate-950 text-slate-50 selection:bg-green-500/30">
+          <Suspense fallback={<RouteFallback />}>
+            <Routes>
+              {/* Public Marketing Entry (Root) */}
+              <Route path="/" element={<RootEntryRoute />} />
+              <Route path="/features" element={<FeaturesRoute />} />
 
-            {/* Non-Public Admin Entry */}
-            <Route path={ADMIN_ENTRY_PATH} element={<AdminEntryRoute />} />
-            <Route path="/admin/*" element={<Navigate to="/" replace />} />
-            <Route path="/dashboard" element={<Navigate to={ADMIN_DASHBOARD_PATH} replace />} />
-            <Route path="/dashboard/edit/:projectId" element={<LegacyDashboardEditRoute />} />
-             
-            {/* Public Album Routes */}
-            <Route path="/:slug" element={<PublicTAPRoute />} />
-            <Route path="/:slug/wallet" element={<WalletPage />} />
-            <Route path="/t/:slug" element={<PublicTAPRoute />} />
-            <Route path="/t/:slug/wallet" element={<WalletPage />} />
+              {/* Dedicated One Album Player */}
+              <Route path="/album/:slug" element={<AlbumPlayerPage />} />
 
-            {/* Administrator Only Routes */}
-            <Route 
-              path={ADMIN_DASHBOARD_PATH} 
-              element={
-                <ProtectedRoute>
-                  <DashboardPage />
-                </ProtectedRoute>
-              } 
-            />
-            <Route 
-              path={`${ADMIN_EDITOR_BASE_PATH}/:projectId`} 
-              element={
-                <ProtectedRoute>
-                  <EditorPage />
-                </ProtectedRoute>
-              } 
-            />
-            
-            {/* Fallback */}
-            <Route path="*" element={<div className="flex items-center justify-center h-screen font-bold text-slate-500 italic text-center px-6">404 - Area Restricted or Link Expired</div>} />
-          </Routes>
-        </Suspense>
-      </div>
+              {/* Non-Public Admin Entry */}
+              <Route path={ADMIN_ENTRY_PATH} element={<AdminEntryRoute />} />
+              <Route path="/admin/*" element={<Navigate to="/" replace />} />
+              <Route path="/dashboard" element={<Navigate to={ADMIN_DASHBOARD_PATH} replace />} />
+              <Route path="/dashboard/edit/:projectId" element={<LegacyDashboardEditRoute />} />
+               
+              {/* Public Album Routes */}
+              <Route path="/:slug" element={<PublicTAPRoute />} />
+              <Route path="/:slug/wallet" element={<WalletPage />} />
+              <Route path="/t/:slug" element={<PublicTAPRoute />} />
+              <Route path="/t/:slug/wallet" element={<WalletPage />} />
+
+              {/* Administrator Only Routes */}
+              <Route 
+                path={ADMIN_DASHBOARD_PATH} 
+                element={
+                  <ProtectedRoute>
+                    <DashboardPage />
+                  </ProtectedRoute>
+                } 
+              />
+              <Route 
+                path={`${ADMIN_EDITOR_BASE_PATH}/:projectId`} 
+                element={
+                  <ProtectedRoute>
+                    <EditorPage />
+                  </ProtectedRoute>
+                } 
+              />
+              
+              {/* Fallback */}
+              <Route path="*" element={<div className="flex items-center justify-center h-screen font-bold text-slate-500 italic text-center px-6">404 - Area Restricted or Link Expired</div>} />
+            </Routes>
+          </Suspense>
+        </div>
+      </AlbumAudioPlayerProvider>
     </BrowserRouter>
   );
 };

@@ -1,6 +1,7 @@
 ﻿
 import React, { useCallback, useContext, useEffect, useMemo, useState, useRef, memo } from 'react';
 import { Music2, Instagram, Twitter, Video, Facebook, Play, Pause, SkipBack, SkipForward, ChevronLeft } from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Project, Track, EventType } from '../types';
 import { StorageService } from '../services/storage';
 import { toSafeTrackPlaybackErrorMessage } from '../services/trackAudio';
@@ -26,6 +27,7 @@ interface TAPRendererProps {
   showInstallButton?: boolean;
   onInstallClick?: () => void;
   suppressBenignPlaybackErrors?: boolean;
+  redirectToAlbumOnLoad?: boolean;
 }
 
 const formatTime = (value: number): string => {
@@ -77,6 +79,7 @@ const useGlobalPlayerStore = (): GlobalPlayerStore => {
 };
 
 type TrackListRowsProps = {
+  projectId: string;
   displayTracks: Track[];
   projectArtistName: string;
   coverSrc: string;
@@ -84,16 +87,19 @@ type TrackListRowsProps = {
   canPlayTrack: (track: Track, resolvedUrl: string) => boolean;
   onTrackPress: (track: Track) => void;
   isPreview: boolean;
+  onFocusModeChange?: (isFocused: boolean) => void;
 };
 
 const TrackListRows: React.FC<TrackListRowsProps> = ({
+  projectId,
   displayTracks,
   projectArtistName,
   coverSrc,
   resolveUrl,
   canPlayTrack,
   onTrackPress,
-  isPreview
+  isPreview,
+  onFocusModeChange
 }) => {
   const {
     currentTrackId,
@@ -106,6 +112,17 @@ const TrackListRows: React.FC<TrackListRowsProps> = ({
     seekTo
   } = useGlobalPlayerStore();
   const [uiMode, setUiMode] = useState<'focused' | 'list'>('focused');
+  const [showIntroOverlay, setShowIntroOverlay] = useState(false);
+  const [introPhase, setIntroPhase] = useState<'idle' | 'slide-in' | 'open' | 'vinyl-out' | 'fade-out'>('idle');
+  const introTimersRef = useRef<number[]>([]);
+  const hasPlayedIntroRef = useRef(false);
+  const introStorageKey = useMemo(() => `tap_focus_intro_played_${String(projectId || 'global')}`, [projectId]);
+
+  const clearIntroTimers = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    introTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
+    introTimersRef.current = [];
+  }, []);
 
   const getTrackAudioUrl = useCallback((track: Track) => {
     return resolveUrl(String(track.trackUrl || track.audioUrl || track.mp3Url || '').trim());
@@ -114,6 +131,7 @@ const TrackListRows: React.FC<TrackListRowsProps> = ({
   const activeTrack = currentTrackId
     ? displayTracks.find((track) => track.trackId === currentTrackId) || null
     : null;
+  const activeTrackId = activeTrack?.trackId || null;
   const activeTrackIndex = activeTrack
     ? displayTracks.findIndex((track) => track.trackId === activeTrack.trackId)
     : -1;
@@ -125,6 +143,61 @@ const TrackListRows: React.FC<TrackListRowsProps> = ({
     activeTrack &&
     (currentTrackId !== null || isPlaying)
   );
+  const isIntroOpened = introPhase === 'open' || introPhase === 'vinyl-out' || introPhase === 'fade-out';
+  const isIntroVinylOut = introPhase === 'vinyl-out' || introPhase === 'fade-out';
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      hasPlayedIntroRef.current = window.sessionStorage.getItem(introStorageKey) === '1';
+    } catch {
+      hasPlayedIntroRef.current = false;
+    }
+  }, [introStorageKey]);
+
+  useEffect(() => {
+    onFocusModeChange?.(shouldShowFocusedTrack);
+  }, [onFocusModeChange, shouldShowFocusedTrack]);
+
+  useEffect(() => {
+    if (!shouldShowFocusedTrack) {
+      clearIntroTimers();
+      setShowIntroOverlay(false);
+      setIntroPhase('idle');
+    }
+  }, [clearIntroTimers, shouldShowFocusedTrack]);
+
+  useEffect(() => {
+    if (!shouldShowFocusedTrack || !activeTrackId || isPreview) return;
+    if (hasPlayedIntroRef.current) return;
+    hasPlayedIntroRef.current = true;
+    clearIntroTimers();
+    setShowIntroOverlay(true);
+    setIntroPhase('slide-in');
+    if (typeof window === 'undefined') return;
+    try {
+      window.sessionStorage.setItem(introStorageKey, '1');
+    } catch {
+      // Ignore storage limitations and continue animation.
+    }
+    const toOpen = window.setTimeout(() => setIntroPhase('open'), 220);
+    const toVinyl = window.setTimeout(() => setIntroPhase('vinyl-out'), 760);
+    const toFade = window.setTimeout(() => setIntroPhase('fade-out'), 1300);
+    const toDone = window.setTimeout(() => {
+      setShowIntroOverlay(false);
+      setIntroPhase('idle');
+      introTimersRef.current = [];
+    }, 1700);
+    introTimersRef.current = [toOpen, toVinyl, toFade, toDone];
+    return () => clearIntroTimers();
+  }, [activeTrackId, clearIntroTimers, introStorageKey, isPreview, shouldShowFocusedTrack]);
+
+  useEffect(() => {
+    return () => {
+      clearIntroTimers();
+      onFocusModeChange?.(false);
+    };
+  }, [clearIntroTimers, onFocusModeChange]);
 
   const getNextPlayableTrack = (offset: -1 | 1): Track | null => {
     if (activeTrackIndex < 0) return null;
@@ -164,7 +237,7 @@ const TrackListRows: React.FC<TrackListRowsProps> = ({
         className={`transition-all duration-300 ease-out ${shouldShowFocusedTrack ? 'opacity-100 translate-y-0' : 'pointer-events-none opacity-0 -translate-y-2 h-0 overflow-hidden'}`}
       >
         {activeTrack && (
-          <div className="rounded-[2.2rem] border border-white/10 bg-slate-900/70 p-4 sm:p-6 shadow-[0_34px_70px_rgba(0,0,0,0.45)]">
+          <div className="relative overflow-hidden rounded-[2.2rem] border border-white/10 bg-slate-900/70 p-4 sm:p-6 shadow-[0_34px_70px_rgba(0,0,0,0.45)]">
             <div className="flex items-center justify-between gap-3">
               <button
                 type="button"
@@ -172,7 +245,7 @@ const TrackListRows: React.FC<TrackListRowsProps> = ({
                 className="inline-flex items-center gap-2 rounded-full border border-slate-700/80 bg-slate-900/70 px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.22em] text-slate-300 transition-colors hover:border-slate-500 hover:text-white active:scale-95 touch-manipulation"
               >
                 <ChevronLeft size={14} />
-                Back to tracks
+                Back to Tracks
               </button>
               <span className="text-[10px] uppercase tracking-[0.3em] font-black text-green-400">Focused Player</span>
             </div>
@@ -272,6 +345,56 @@ const TrackListRows: React.FC<TrackListRowsProps> = ({
                 <SkipForward size={18} fill="currentColor" />
               </button>
             </div>
+
+            {showIntroOverlay && (
+              <div
+                className={`absolute inset-0 z-20 transition-opacity duration-400 ${introPhase === 'fade-out' ? 'opacity-0' : 'opacity-100'}`}
+                aria-hidden="true"
+              >
+                <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-sm" />
+                <div className="relative h-full w-full flex items-center justify-center px-5">
+                  <div className="relative w-[min(76vw,320px)] aspect-square [perspective:1200px]">
+                    <div
+                      className="absolute inset-0 transition-transform duration-500 ease-out"
+                      style={{
+                        transform: introPhase === 'slide-in' ? 'translateX(68%) rotate(6deg)' : 'translateX(0%) rotate(0deg)'
+                      }}
+                    >
+                      <div className="absolute inset-0 rounded-[1.1rem] border border-slate-700/80 bg-slate-900/90 shadow-[0_20px_50px_rgba(0,0,0,0.6)] overflow-hidden">
+                        <div
+                          className="absolute left-[7%] top-[7%] h-[86%] aspect-square rounded-full border border-slate-600/80 bg-[radial-gradient(circle_at_32%_32%,#64748b_0%,#0f172a_46%,#020617_100%)] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.09)] transition-transform duration-700 ease-out"
+                          style={{
+                            transform: isIntroVinylOut ? 'translateX(34%) rotate(22deg)' : 'translateX(9%) rotate(0deg)'
+                          }}
+                        >
+                          <div className="absolute inset-[44%] rounded-full border border-slate-500/70 bg-slate-900/95" />
+                        </div>
+                        <div
+                          className="absolute inset-0 origin-left rounded-[1.1rem] border border-white/15 bg-slate-900/95 overflow-hidden transition-transform duration-700 ease-in-out"
+                          style={{
+                            transform: isIntroOpened ? 'rotateY(-60deg)' : 'rotateY(0deg)',
+                            transformStyle: 'preserve-3d'
+                          }}
+                        >
+                          {focusArtworkUrl ? (
+                            <img
+                              src={focusArtworkUrl}
+                              alt={`${activeTrack.title} sleeve`}
+                              className="h-full w-full object-cover"
+                              loading="eager"
+                              decoding="async"
+                            />
+                          ) : (
+                            <div className="h-full w-full bg-slate-800" />
+                          )}
+                          <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-white/20 via-transparent to-black/35" />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -371,10 +494,14 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   onPlayerStateChange,
   showInstallButton = false,
   onInstallClick,
-  suppressBenignPlaybackErrors = false
+  suppressBenignPlaybackErrors = false,
+  redirectToAlbumOnLoad = false
 }) => {
+  const navigate = useNavigate();
+  const location = useLocation();
   const [currentlyPlayingTrackId, setCurrentlyPlayingTrackId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isFocusedUiActive, setIsFocusedUiActive] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
@@ -393,6 +520,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
   const lastOnErrorRebuildSignatureRef = useRef('');
   const noCorsFallbackOriginsRef = useRef<Record<string, true>>({});
   const corsHeadDiagnosticsRef = useRef<Record<string, CorsHeadProbeResult>>({});
+  const redirectSlugRef = useRef<string | null>(null);
   const pendingAudioRemountRef = useRef<{
     resolve: (audio: HTMLAudioElement) => void;
     reject: (error: Error) => void;
@@ -1709,6 +1837,17 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     }
   }, [project.projectId, project.slug, tracks.length, mp3Tracks.length]);
 
+  useEffect(() => {
+    if (!redirectToAlbumOnLoad || isPreview) return;
+    const slug = String(project.slug || '').trim();
+    if (!slug) return;
+    const targetPath = `/album/${encodeURIComponent(slug)}`;
+    if (location.pathname === targetPath) return;
+    if (redirectSlugRef.current === slug) return;
+    redirectSlugRef.current = slug;
+    navigate(targetPath, { replace: true });
+  }, [redirectToAlbumOnLoad, isPreview, project.slug, location.pathname, navigate]);
+
   const resolvedCover = resolveUrl(project.coverImageUrl || '');
   const coverSrc = resolvedCover || '';
 
@@ -1788,7 +1927,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
     <GlobalPlayerContext.Provider value={playerStore}>
       <div className={`${isPreview ? 'w-full h-full bg-slate-950 overflow-y-auto scrollbar-hide text-slate-100 flex flex-col' : 'relative w-full tap-full-height bg-slate-950 text-slate-100 flex flex-col'}`}>
         <div className={`${isPreview ? 'h-full overflow-y-auto scrollbar-hide' : 'flex-1 overflow-y-auto tap-native-scroll pb-44'}`}>
-        {!isPreview && showMeta && (
+        {!isPreview && showMeta && !isFocusedUiActive && (
           useGoLiveHeader ? (
             <GoLiveAlbumHeader
               title={project.title}
@@ -1811,7 +1950,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
           )
         )}
 
-        {showCover && (
+        {showCover && !isFocusedUiActive && (
           <div className={`${isPreview ? 'px-6 pt-8 pb-4' : 'px-4 pt-5 pb-4'} flex justify-center`}>
             <div className={`${isPreview ? 'max-w-[280px] rounded-[2.5rem]' : 'max-w-[360px] rounded-[2.1rem]'} relative aspect-square w-full shadow-[0_30px_70px_rgba(0,0,0,0.7)] overflow-hidden border border-white/10 ring-1 ring-white/5`}>
               {coverSrc ? (
@@ -1834,14 +1973,14 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
           </div>
         )}
 
-        {showMeta && isPreview && (
+        {showMeta && isPreview && !isFocusedUiActive && (
           <div className="px-6 pb-4 text-center">
             <h1 className="text-2xl font-black tracking-tight text-white">{project.title}</h1>
             <p className="text-xs font-bold uppercase tracking-[0.3em] text-green-400 mt-2">{project.artistName}</p>
           </div>
         )}
 
-        {socialBadges.length > 0 && (
+        {socialBadges.length > 0 && !isFocusedUiActive && (
           <div className={`${isPreview ? 'px-6 pb-4' : 'px-4 pb-4'}`}>
             <div className="flex items-center justify-center gap-3">
               {socialBadges.map((badge) => (
@@ -1878,6 +2017,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
               </div>
             )}
             <TrackListRows
+              projectId={project.projectId}
               displayTracks={displayTracks}
               projectArtistName={project.artistName || ''}
               coverSrc={coverSrc}
@@ -1885,6 +2025,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
               canPlayTrack={canPlayTrack}
               onTrackPress={toggleTrackPlayback}
               isPreview={isPreview}
+              onFocusModeChange={setIsFocusedUiActive}
             />
             {displayTracks.length === 0 && (
               <div className="py-12 text-center bg-slate-900/20 rounded-[2rem] border border-dashed border-slate-800/60">
@@ -1894,7 +2035,7 @@ const TAPRenderer: React.FC<TAPRendererProps> = ({
             )}
           </div>
 
-          {(ticketsUrl || merchUrl) && (
+          {(ticketsUrl || merchUrl) && !isFocusedUiActive && (
             <div className="pt-4">
               <div className={`grid gap-3 ${ticketsUrl && merchUrl ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'}`}>
                 {ticketsUrl && (

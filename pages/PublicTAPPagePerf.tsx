@@ -1495,6 +1495,7 @@ const PublicTAPPage: React.FC = () => {
       showCover: true,
       showMeta: true,
       showAllTracks: true,
+      redirectToAlbumOnLoad: true,
       useGoLiveHeader: isPublicGoLiveRoute,
       resolveAssetUrl: resolveAsset,
       resolveTrackAudioUrl: resolveTrackAudioForPlayback,

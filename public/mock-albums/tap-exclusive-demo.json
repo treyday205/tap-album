@@ -1,0 +1,91 @@
+{
+  "slug": "tap-exclusive-demo",
+  "title": "After Midnight Sessions",
+  "artist": "Nova Vale",
+  "cover": "https://images.unsplash.com/photo-1516280440614-37939bbacd81?auto=format&fit=crop&w=1200&q=80",
+  "editionNumber": 37,
+  "editionTotal": 500,
+  "tracks": [
+    {
+      "id": "intro-night-drive",
+      "title": "Night Drive Intro",
+      "audioUrl": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
+      "duration": 356
+    },
+    {
+      "id": "neon-signals",
+      "title": "Neon Signals",
+      "audioUrl": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
+      "duration": 299
+    },
+    {
+      "id": "backseat-reverbs",
+      "title": "Backseat Reverbs",
+      "audioUrl": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3",
+      "duration": 324
+    },
+    {
+      "id": "glowline",
+      "title": "Glowline",
+      "audioUrl": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3",
+      "duration": 361
+    },
+    {
+      "id": "last-train-home",
+      "title": "Last Train Home",
+      "audioUrl": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-5.mp3",
+      "duration": 411
+    }
+  ],
+  "links": {
+    "merch": "https://tapalbum.app/merch",
+    "tickets": "https://tapalbum.app/tour",
+    "instagram": "https://instagram.com",
+    "tiktok": "https://tiktok.com",
+    "youtube": "https://youtube.com"
+  },
+  "merchCards": [
+    {
+      "id": "hoodie-drop",
+      "title": "Midnight Tour Hoodie",
+      "subtitle": "Limited Collector Drop",
+      "description": "Heavyweight black hoodie with embroidered Tap-Album edition mark.",
+      "price": "$95",
+      "image": "https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?auto=format&fit=crop&w=1200&q=80",
+      "ctaLabel": "Shop Hoodie",
+      "url": "https://tapalbum.app/merch/hoodie"
+    },
+    {
+      "id": "vinyl-bundle",
+      "title": "Signed Vinyl Bundle",
+      "subtitle": "Edition-matched insert",
+      "description": "Includes glow vinyl, lyric booklet, and serialized collector card.",
+      "price": "$120",
+      "image": "https://images.unsplash.com/photo-1619983081563-430f63602796?auto=format&fit=crop&w=1200&q=80",
+      "ctaLabel": "Get Bundle",
+      "url": "https://tapalbum.app/merch/vinyl-bundle"
+    }
+  ],
+  "ticketCards": [
+    {
+      "id": "chi-night-1",
+      "title": "Chicago - Night 1",
+      "location": "Metro, Chicago",
+      "date": "April 12, 2026",
+      "description": "Special Tap-Album fan queue access included.",
+      "price": "$49",
+      "ctaLabel": "Reserve",
+      "url": "https://tapalbum.app/tickets/chicago"
+    },
+    {
+      "id": "nyc-night-2",
+      "title": "New York - Night 2",
+      "location": "Bowery Ballroom, NYC",
+      "date": "May 3, 2026",
+      "description": "Includes exclusive merch pickup lane.",
+      "price": "$59",
+      "ctaLabel": "Reserve",
+      "url": "https://tapalbum.app/tickets/nyc"
+    }
+  ]
+}
