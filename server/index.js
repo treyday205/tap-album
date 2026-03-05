@@ -465,14 +465,46 @@ const ensureSchema = async () => {
   }
 };
 const APP_ORIGIN = APP_URL ? new URL(APP_URL).origin : '';
+const RAILWAY_ORIGIN = (() => {
+  const raw =
+    process.env.RAILWAY_PUBLIC_DOMAIN ||
+    process.env.RAILWAY_PUBLIC_URL ||
+    process.env.RAILWAY_STATIC_URL ||
+    process.env.RAILWAY_URL;
+  const normalized = normalizeAppUrl(raw);
+  if (!normalized) return '';
+  try {
+    return new URL(normalized).origin;
+  } catch {
+    return '';
+  }
+})();
+const REQUIRED_R2_CORS_ORIGINS = Array.from(
+  new Set([
+    'https://www.tapalbum.com',
+    APP_ORIGIN,
+    RAILWAY_ORIGIN
+  ].filter(Boolean))
+);
 const ALLOWED_ORIGINS = new Set([
   'http://localhost:5173',
   'http://localhost:5174',
   'http://127.0.0.1:5174',
   'http://localhost:3000',
   'http://localhost:3001',
-  APP_ORIGIN
+  APP_ORIGIN,
+  RAILWAY_ORIGIN,
+  'https://www.tapalbum.com'
 ].filter(Boolean));
+
+if (S3_BUCKET) {
+  console.log('[R2_CORS_REQUIRED]', {
+    bucket: S3_BUCKET,
+    methods: ['PUT', 'GET', 'HEAD'],
+    origins: REQUIRED_R2_CORS_ORIGINS,
+    note: 'Ensure the Cloudflare R2 bucket CORS includes these origins during production/testing.'
+  });
+}
 
 const CORS_ALLOW_ALL = process.env.CORS_ALLOW_ALL === 'true';
 app.set('trust proxy', 1);

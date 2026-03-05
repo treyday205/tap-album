@@ -31,7 +31,7 @@ View your app in AI Studio: https://ai.studio/apps/drive/1i92dDHEBcqxwnJiWQNRS5q
 
 Notes:
 - If `RESEND_API_KEY`/`RESEND_FROM` are not set in dev, the legacy backend magic-link endpoint logs the link to the console.
-- For S3/R2 direct uploads and signed GETs, configure bucket CORS to allow `PUT`, `GET`, and `HEAD` from your app origin.
+- For S3/R2 direct uploads and signed GETs, configure bucket CORS to allow `PUT`, `GET`, and `HEAD` from `https://www.tapalbum.com` and your Railway app origin during testing.
 - Keep the bucket private; the app uses signed GET URLs for protected playback and artwork.
 
 ## Supabase Email Auth Setup

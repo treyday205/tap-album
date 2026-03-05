@@ -688,6 +688,19 @@ const EditorPage: React.FC = () => {
     }
   };
 
+  const getUploadErrorMessage = (err: any, fallback = 'Upload failed.') => {
+    const status = Number(err?.status);
+    if (Number.isFinite(status) && status === 0) {
+      return 'CORS/Network blocked';
+    }
+    const hint = String(err?.hint || '').trim();
+    if (hint) {
+      return hint;
+    }
+    const message = String(err?.message || '').trim();
+    return message || fallback;
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, type: 'PROJECT_IMAGE' | 'TRACK_IMAGE' | 'TRACK_AUDIO') => {
     const inputFiles = e.target.files;
     if (!inputFiles || inputFiles.length === 0) {
@@ -946,7 +959,7 @@ const EditorPage: React.FC = () => {
           await uploadAudioToTrack(item.file, item.trackId);
         }
       } catch (err: any) {
-        const message = err?.message || 'Upload failed.';
+        const message = getUploadErrorMessage(err);
         setUploadError(message);
         alert(message);
       } finally {
@@ -1008,19 +1021,49 @@ const EditorPage: React.FC = () => {
           },
           adminToken
         );
-        const persistedCover = String(
-          persisted?.project?.coverImageUrl ||
-          persisted?.coverPath ||
-          assetRef
+
+        const refreshedCover = await Api.getProjectCoverUrl(projectId, adminToken);
+        const refreshedCoverKey = String(refreshedCover?.coverKey || coverKey).trim();
+        const refreshedCoverMime = String(
+          refreshedCover?.coverMime ||
+          persisted?.coverMime ||
+          result?.contentType ||
+          file.type ||
+          ''
         ).trim();
+        const refreshedCoverUrl = String(
+          refreshedCover?.coverUrl ||
+          persisted?.coverUrl ||
+          persisted?.project?.coverUrl ||
+          ''
+        ).trim();
+        const refreshedCoverExpiresAtValue = Number(
+          refreshedCover?.coverUrlExpiresAt ??
+          persisted?.coverUrlExpiresAt ??
+          persisted?.project?.coverUrlExpiresAt
+        );
+        const refreshedCoverExpiresAt = Number.isFinite(refreshedCoverExpiresAtValue)
+          ? refreshedCoverExpiresAtValue
+          : null;
+        const coverRef = refreshedCoverKey ? `asset:${refreshedCoverKey}` : assetRef;
+
         handleSaveProject({
-          coverImageUrl: persistedCover,
-          updatedAt: persisted?.project?.updatedAt || new Date().toISOString()
+          coverImageUrl: refreshedCoverUrl || coverRef || '',
+          coverRef: coverRef || null,
+          coverKey: refreshedCoverKey || null,
+          coverMime: refreshedCoverMime || null,
+          coverUrl: refreshedCoverUrl || null,
+          coverUrlExpiresAt: refreshedCoverExpiresAt,
+          updatedAt:
+            String(refreshedCover?.updatedAt || persisted?.project?.updatedAt || '').trim() ||
+            new Date().toISOString()
         });
-        ensureSignedAssets([assetRef]);
+        if (coverRef) {
+          ensureSignedAssets([coverRef]);
+        }
         setUploadError(null);
       } catch (err: any) {
-        const message = err?.message || 'Upload failed.';
+        const message = getUploadErrorMessage(err);
         setUploadError(message);
         alert(message);
       } finally {
@@ -1048,7 +1091,7 @@ const EditorPage: React.FC = () => {
       ensureSignedAssets([assetRef]);
       setUploadError(null);
     } catch (err: any) {
-      const message = err?.message || 'Upload failed.';
+      const message = getUploadErrorMessage(err);
       setUploadError(message);
       alert(message);
     } finally {
@@ -1511,7 +1554,7 @@ const EditorPage: React.FC = () => {
                     <div onClick={() => triggerFileUpload('PROJECT_IMAGE')} className="group relative w-48 h-48 bg-slate-800 rounded-3xl overflow-hidden cursor-pointer border-2 border-dashed border-slate-700 hover:border-green-500 transition-all flex-shrink-0">
                       <ResponsiveImage
                         src={resolveAsset(project.coverImageUrl || '')}
-                        assetRef={project.coverImageUrl}
+                        assetRef={project.coverRef || (project.coverKey ? `asset:${project.coverKey}` : project.coverImageUrl)}
                         alt="Album Art"
                         className="w-full h-full object-cover group-hover:opacity-40 transition-opacity"
                         sizes="(max-width: 768px) 40vw, 192px"

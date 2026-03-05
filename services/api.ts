@@ -296,8 +296,33 @@ export const Api = {
     contentType?: string;
   }> =>
     new Promise(async (resolve, reject) => {
+      type UploadError = Error & {
+        status?: number;
+        code?: string;
+        hint?: string;
+      };
+
+      const buildUploadError = (
+        message: string,
+        extras: Partial<UploadError> = {}
+      ): UploadError => {
+        const err = new Error(message) as UploadError;
+        if (extras.status !== undefined) err.status = extras.status;
+        if (extras.code) err.code = extras.code;
+        if (extras.hint) err.hint = extras.hint;
+        return err;
+      };
+
       const isTrackAudio = options.assetKind === 'track-audio';
-      const contentType = String(file.type || '').trim() || (isTrackAudio ? 'audio/mpeg' : 'application/octet-stream');
+      const isProjectCover = options.assetKind === 'project-cover';
+      const browserContentType = String(file.type || '').trim();
+
+      if (isProjectCover && !browserContentType) {
+        reject(buildUploadError('Cover file type missing.'));
+        return;
+      }
+
+      const contentType = browserContentType || (isTrackAudio ? 'audio/mpeg' : 'application/octet-stream');
 
       const requestPresign = () =>
         request('/api/uploads/presign', {
@@ -314,108 +339,214 @@ export const Api = {
           })
         });
 
-      const uploadWithConfig = (presign: any) =>
-        new Promise<void>((resolveUpload, rejectUpload) => {
-          const uploadUrl = String(presign?.uploadUrl || '');
-          const assetRef = String(presign?.assetRef || '');
-          const method = String(presign?.method || 'PUT').toUpperCase();
-          const headers = {
-            ...(presign?.headers || {})
-          } as Record<string, string>;
-          const storage = presign?.storage || 'unknown';
+      const uploadWithConfig = async (presign: any) => {
+        const uploadUrl = String(presign?.uploadUrl || '');
+        const assetRef = String(presign?.assetRef || '');
+        const method = String(presign?.method || 'PUT').toUpperCase();
+        const storage = presign?.storage || 'unknown';
 
-          if (!uploadUrl || !assetRef) {
-            rejectUpload(new Error('Upload configuration missing.'));
-            return;
+        if (!uploadUrl || !assetRef) {
+          throw buildUploadError('Upload configuration missing.');
+        }
+
+        const resolvedUploadUrl = /^https?:\/\//i.test(uploadUrl)
+          ? uploadUrl
+          : `${API_BASE_URL}${uploadUrl}`;
+        const uploadHost = (() => {
+          try {
+            return new URL(resolvedUploadUrl).host;
+          } catch {
+            return null;
           }
-          const resolvedContentTypeHeader = String(
-            presign?.contentType || headers['content-type'] || contentType
-          );
-          delete headers['content-type'];
-          headers['Content-Type'] = resolvedContentTypeHeader;
+        })();
 
-          reportUploadTelemetry({
-            stage: 'presign',
-            storage,
-            assetKind: options.assetKind,
-            projectId,
-            trackId: options.trackId || null,
-            fileName: file.name,
-            size: file.size
-          });
+        const putContentType = String(
+          (isProjectCover ? browserContentType : '') ||
+          presign?.contentType ||
+          contentType
+        ).trim();
 
-          const resolvedUploadUrl = /^https?:\/\//i.test(uploadUrl)
-            ? uploadUrl
-            : `${API_BASE_URL}${uploadUrl}`;
+        if (!putContentType) {
+          throw buildUploadError('Upload MIME type missing.');
+        }
 
-          const xhr = new XMLHttpRequest();
-          xhr.open(method, resolvedUploadUrl);
-          xhr.responseType = 'json';
+        reportUploadTelemetry({
+          stage: 'presign',
+          storage,
+          assetKind: options.assetKind,
+          projectId,
+          trackId: options.trackId || null,
+          fileName: file.name,
+          size: file.size,
+          uploadHost
+        });
 
-          if (options.onProgress) {
+        if (options.onProgress) {
+          await new Promise<void>((resolveUpload, rejectUpload) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open(method, resolvedUploadUrl);
+            xhr.responseType = 'json';
+
             xhr.upload.onprogress = (event) => {
               if (!event.lengthComputable) return;
               const percent = Math.round((event.loaded / event.total) * 100);
               options.onProgress?.(Math.min(100, Math.max(0, percent)));
             };
-          }
 
-          Object.entries(headers).forEach(([key, value]) => {
-            if (value === undefined || value === null) return;
-            xhr.setRequestHeader(key, String(value));
-          });
+            xhr.setRequestHeader('Content-Type', putContentType);
 
-          xhr.onload = () => {
-            if (xhr.status >= 200 && xhr.status < 300) {
-              reportUploadTelemetry({
-                stage: 'put',
-                status: xhr.status,
-                storage,
+            xhr.onload = () => {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                reportUploadTelemetry({
+                  stage: 'put',
+                  status: xhr.status,
+                  storage,
+                  uploadHost,
+                  assetKind: options.assetKind,
+                  projectId,
+                  trackId: options.trackId || null,
+                  fileName: file.name
+                });
+                resolveUpload();
+                return;
+              }
+
+              const bodyText = String(xhr.responseText || '').trim();
+              console.error('UPLOAD_PUT_FAILED', {
                 assetKind: options.assetKind,
                 projectId,
                 trackId: options.trackId || null,
-                fileName: file.name
+                uploadHost,
+                status: xhr.status,
+                bodyText
               });
-              resolveUpload();
-              return;
+              reportUploadTelemetry({
+                stage: 'put_failed',
+                status: xhr.status,
+                storage,
+                uploadHost,
+                assetKind: options.assetKind,
+                projectId,
+                trackId: options.trackId || null,
+                fileName: file.name,
+                error: bodyText || `Upload failed (status ${xhr.status})`
+              });
+              rejectUpload(
+                buildUploadError(bodyText || `Upload failed (status ${xhr.status})`, {
+                  status: xhr.status,
+                  code: 'UPLOAD_PUT_FAILED'
+                })
+              );
+            };
+
+            xhr.onerror = () => {
+              console.error('UPLOAD_PUT_FAILED', {
+                assetKind: options.assetKind,
+                projectId,
+                trackId: options.trackId || null,
+                uploadHost,
+                status: 0,
+                error: 'CORS/Network blocked'
+              });
+              reportUploadTelemetry({
+                stage: 'put_failed',
+                status: 0,
+                storage,
+                uploadHost,
+                assetKind: options.assetKind,
+                projectId,
+                trackId: options.trackId || null,
+                fileName: file.name,
+                error: 'CORS/Network blocked'
+              });
+              rejectUpload(
+                buildUploadError('CORS/Network blocked', {
+                  status: 0,
+                  code: 'UPLOAD_PUT_FAILED',
+                  hint: 'CORS/Network blocked'
+                })
+              );
+            };
+
+            xhr.send(file);
+          });
+          return;
+        }
+
+        let response: Response;
+        try {
+          response = await fetch(resolvedUploadUrl, {
+            method,
+            body: file,
+            headers: {
+              'Content-Type': putContentType
             }
-            const data = xhr.response || (() => {
-              try {
-                return JSON.parse(xhr.responseText || '{}');
-              } catch {
-                return {};
-              }
-            })();
-            reportUploadTelemetry({
-              stage: 'put',
-              status: xhr.status,
-              storage,
-              assetKind: options.assetKind,
-              projectId,
-              trackId: options.trackId || null,
-              fileName: file.name,
-              error: data?.message || xhr.responseText || 'upload failed'
-            });
-            const message = data?.message || `Upload failed (status ${xhr.status})`;
-            rejectUpload(new Error(message));
-          };
+          });
+        } catch {
+          console.error('UPLOAD_PUT_FAILED', {
+            assetKind: options.assetKind,
+            projectId,
+            trackId: options.trackId || null,
+            uploadHost,
+            status: 0,
+            error: 'CORS/Network blocked'
+          });
+          reportUploadTelemetry({
+            stage: 'put_failed',
+            status: 0,
+            storage,
+            uploadHost,
+            assetKind: options.assetKind,
+            projectId,
+            trackId: options.trackId || null,
+            fileName: file.name,
+            error: 'CORS/Network blocked'
+          });
+          throw buildUploadError('CORS/Network blocked', {
+            status: 0,
+            code: 'UPLOAD_PUT_FAILED',
+            hint: 'CORS/Network blocked'
+          });
+        }
 
-          xhr.onerror = () => {
-            reportUploadTelemetry({
-              stage: 'put',
-              status: xhr.status || 0,
-              storage,
-              assetKind: options.assetKind,
-              projectId,
-              trackId: options.trackId || null,
-              fileName: file.name,
-              error: 'network error'
-            });
-            rejectUpload(new Error(`Upload failed (status ${xhr.status || 0})`));
-          };
+        if (!response.ok) {
+          const bodyText = (await response.text().catch(() => '')).trim();
+          console.error('UPLOAD_PUT_FAILED', {
+            assetKind: options.assetKind,
+            projectId,
+            trackId: options.trackId || null,
+            uploadHost,
+            status: response.status,
+            bodyText
+          });
+          reportUploadTelemetry({
+            stage: 'put_failed',
+            status: response.status,
+            storage,
+            uploadHost,
+            assetKind: options.assetKind,
+            projectId,
+            trackId: options.trackId || null,
+            fileName: file.name,
+            error: bodyText || `Upload failed (status ${response.status})`
+          });
+          throw buildUploadError(bodyText || `Upload failed (status ${response.status})`, {
+            status: response.status,
+            code: 'UPLOAD_PUT_FAILED'
+          });
+        }
 
-          xhr.send(file);
+        reportUploadTelemetry({
+          stage: 'put',
+          status: response.status,
+          storage,
+          uploadHost,
+          assetKind: options.assetKind,
+          projectId,
+          trackId: options.trackId || null,
+          fileName: file.name
         });
+      };
 
       try {
         const presign = await requestPresign();
