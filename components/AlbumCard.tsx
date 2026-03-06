@@ -44,10 +44,12 @@ const AlbumCard: React.FC<AlbumCardProps> = ({
       setCoverStatus('missing');
       return;
     }
-    if (effectiveSrc && coverStatus !== 'ready') {
+    if (effectiveSrc) {
       setCoverStatus('loading');
+      return;
     }
-  }, [hasCoverReference, effectiveSrc, coverStatus]);
+    setCoverStatus('missing');
+  }, [hasCoverReference, effectiveSrc]);
 
   const handleImageLoad = () => {
     setCoverStatus('ready');
@@ -63,16 +65,16 @@ const AlbumCard: React.FC<AlbumCardProps> = ({
       try {
         const nextSrc = await onRetryCoverUrl(project);
         const normalized = String(nextSrc || '').trim();
-        if (normalized) {
+        if (normalized && normalized !== effectiveSrc) {
           setRetrySrc(normalized);
           setCoverStatus('loading');
           return;
         }
       } catch {
-        // keep loading skeleton when a cover reference exists
+        // no-op; fall back to placeholder
       }
     }
-    setCoverStatus('loading');
+    setCoverStatus('missing');
   };
 
   return (
