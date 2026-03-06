@@ -235,7 +235,16 @@ const EditorPage: React.FC = () => {
 
       setIsHydratingRemoteProject(true);
       try {
-        const response = await Api.getProjectBySlug(normalizedSlug);
+        const adminToken = localStorage.getItem('tap_admin_token') || undefined;
+        let response: any = null;
+        try {
+          response = await Api.getProject(projectId, adminToken);
+        } catch (projectFetchErr) {
+          response = await Api.getProjectBySlug(normalizedSlug);
+          if (import.meta.env.DEV) {
+            console.warn('[DEV] project fetch by ID failed; fell back to slug', projectFetchErr);
+          }
+        }
         if (cancelled) return;
 
         const remoteProjectRaw = response?.project || null;

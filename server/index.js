@@ -1346,6 +1346,135 @@ const buildTrackStoragePayload = () => ({
   signedUrlTtl: resolveSignedUrlTtlSeconds(S3_SIGNED_URL_TTL, 900)
 });
 
+const buildProjectDetailPayload = async (row, options = {}) => {
+  const lookupLabel = String(options.lookupLabel || 'slug').trim() || 'slug';
+  const lookupValue = String(options.lookupValue || row?.slug || row?.project_id || '').trim();
+  const trackResult = await query(
+    'SELECT * FROM tracks WHERE project_id = $1 ORDER BY COALESCE(track_no, 0) ASC, COALESCE(sort_order, 0) ASC, created_at ASC',
+    [row.project_id]
+  );
+
+  const baseProject = await buildProjectPayload(row, { includeSignedCover: true });
+  const project = {
+    ...baseProject,
+    coverRef: baseProject.coverImageUrl || '',
+    coverImageUrl: baseProject.coverUrl || '',
+    cover_url: baseProject.coverUrl || '',
+    cover_key: baseProject.coverKey || '',
+    cover_ref: baseProject.coverImageUrl || ''
+  };
+
+  const tracks = await Promise.all(trackResult.rows.map(async (track, index) => {
+    const audioKey = normalizeTrackStoragePath(
+      track.audio_key,
+      track.audio_path || track.storage_path || track.mp3_url
+    ) || '';
+    const audioPath =
+      normalizeTrackAudioPath(track.audio_path, audioKey, track.mp3_url) || audioKey || '';
+    const externalTrackUrl = audioKey
+      ? ''
+      : String(
+          normalizeTrackAudioUrl(
+            track.audio_url,
+            isAssetRef(track.mp3_url) ? '' : track.mp3_url
+          ) || ''
+        ).trim();
+    let signedPlayback = null;
+    if (audioKey) {
+      try {
+        signedPlayback = await resolveTrackPlaybackUrlFromStoragePath(audioKey);
+      } catch (error) {
+        console.error('[TRACK_SIGN_FAILED]', {
+          [lookupLabel]: lookupValue,
+          projectId: row.project_id,
+          trackId: track.track_id,
+          audioKey,
+          error: String(error?.message || error || 'unknown')
+        });
+      }
+    }
+    const audioUrl = String(signedPlayback?.url || externalTrackUrl || '').trim();
+    const audioUrlExpiresAt = signedPlayback?.expiresAt || null;
+    const trackNoValue = Number(track.track_no ?? track.sort_order ?? index + 1);
+    const trackNo = Number.isFinite(trackNoValue)
+      ? Math.max(1, Math.floor(trackNoValue))
+      : index + 1;
+    const sortOrderValue = Number(track.sort_order ?? trackNo);
+    const sortOrder = Number.isFinite(sortOrderValue)
+      ? Math.max(0, Math.floor(sortOrderValue))
+      : trackNo;
+
+    return {
+      trackId: track.track_id,
+      projectId: track.project_id,
+      title: track.title,
+      trackNo,
+      audioKey: audioKey || null,
+      storagePath: audioKey || audioPath || '',
+      storageBucket: audioKey ? (S3_BUCKET || '') : '',
+      audioPath,
+      audio_path: audioPath,
+      audioUrl,
+      audio_url: audioUrl,
+      audioUrlExpiresAt,
+      trackUrl: audioUrl || externalTrackUrl || '',
+      mp3Url: audioUrl || externalTrackUrl || '',
+      artworkUrl: track.artwork_url || '',
+      sortOrder,
+      createdAt: track.created_at
+    };
+  }));
+
+  const tracksMissingPlayableUrl = tracks.filter((track) => !String(track.audioUrl || '').trim());
+  if (tracks.length > 0 && tracksMissingPlayableUrl.length === tracks.length) {
+    console.error('[ALBUM_FETCH_NO_PLAYABLE_TRACKS]', {
+      [lookupLabel]: lookupValue,
+      projectId: row.project_id,
+      trackCount: tracks.length
+    });
+  } else if (tracksMissingPlayableUrl.length > 0) {
+    console.warn('[ALBUM_FETCH_TRACKS_MISSING_AUDIO]', {
+      [lookupLabel]: lookupValue,
+      projectId: row.project_id,
+      missingTrackIds: tracksMissingPlayableUrl.map((track) => track.trackId)
+    });
+  }
+  if (project.coverKey && !project.coverUrl) {
+    console.error('[ALBUM_FETCH_COVER_SIGN_FAILED]', {
+      [lookupLabel]: lookupValue,
+      projectId: row.project_id,
+      coverKey: project.coverKey
+    });
+  }
+
+  if (IS_DEV) {
+    console.log('[DEV] project fetch', {
+      [lookupLabel]: lookupValue,
+      projectId: row.project_id,
+      tracks: tracks.length,
+      trackUrlPresence: tracks.map((track) => ({
+        trackId: track.trackId,
+        hasTrackUrl: Boolean(String(track.trackUrl || '').trim()),
+        hasAudioUrl: Boolean(String(track.audioUrl || '').trim()),
+        hasMp3Url: Boolean(String(track.mp3Url || '').trim())
+      }))
+    });
+
+    const suspectUrls = [
+      project.coverUrl,
+      ...tracks.map((t) => t.audioUrl),
+      ...tracks.map((t) => t.trackUrl),
+      ...tracks.map((t) => t.artworkUrl)
+    ].filter(Boolean);
+    const hasLocalPaths = suspectUrls.some((url) => /^([a-zA-Z]:\\\\|file:|\\\\)/.test(url));
+    if (hasLocalPaths) {
+      console.log('[DEV] project asset warning: local file paths detected.');
+    }
+  }
+
+  return { project, tracks };
+};
+
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
@@ -3324,17 +3453,66 @@ app.post('/api/projects/sync', async (req, res) => {
   }
 });
 
+app.get('/api/projects/:projectId([A-Fa-f0-9]{9})', async (req, res, next) => {
+  const safeProjectId = safeSegment(req.params.projectId);
+  if (!safeProjectId) {
+    return next();
+  }
+
+  const ownerScope = IS_DEV ? ADMIN_OWNER_USER_ID : getAdminOwnerScope(req);
+  if (!ownerScope) {
+    return next();
+  }
+
+  try {
+    const projectResult = await query(
+      'SELECT * FROM projects WHERE project_id = $1 LIMIT 1',
+      [safeProjectId]
+    );
+    if (projectResult.rows.length === 0) {
+      return next();
+    }
+
+    const row = projectResult.rows[0];
+    const rowOwner = ownerUserIdFromData(row.data);
+    if (rowOwner !== ownerScope) {
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+
+    const { project, tracks } = await buildProjectDetailPayload(row, {
+      lookupLabel: 'projectId',
+      lookupValue: safeProjectId
+    });
+
+    res.set('Cache-Control', 'no-store');
+    return res.json({
+      success: true,
+      project,
+      tracks,
+      trackStorage: buildTrackStoragePayload()
+    });
+  } catch (err) {
+    console.error('Project fetch by ID failed:', err);
+    return res.status(500).json({ message: 'Project fetch failed.' });
+  }
+});
+
 app.get('/api/projects/:slug', async (req, res) => {
   const slug = String(req.params.slug || '').trim();
   if (!slug) {
     return res.status(400).json({ message: 'slug is required.' });
   }
 
+  const ownerScope = IS_DEV ? ADMIN_OWNER_USER_ID : getAdminOwnerScope(req);
+  const allowAdminScope = Boolean(ownerScope);
+
   try {
     const projectResult = await query(
-      IS_DEV
+      allowAdminScope
         ? 'SELECT * FROM projects WHERE slug = $1 ORDER BY updated_at DESC LIMIT 1'
-        : 'SELECT * FROM projects WHERE slug = $1 AND published = true LIMIT 1',
+        : IS_DEV
+          ? 'SELECT * FROM projects WHERE slug = $1 ORDER BY updated_at DESC LIMIT 1'
+          : 'SELECT * FROM projects WHERE slug = $1 AND published = true LIMIT 1',
       [slug]
     );
     if (projectResult.rows.length === 0) {
@@ -3345,126 +3523,19 @@ app.get('/api/projects/:slug', async (req, res) => {
     }
 
     const row = projectResult.rows[0];
-    const trackResult = await query(
-      'SELECT * FROM tracks WHERE project_id = $1 ORDER BY COALESCE(track_no, 0) ASC, COALESCE(sort_order, 0) ASC, created_at ASC',
-      [row.project_id]
-    );
-
-    const baseProject = await buildProjectPayload(row, { includeSignedCover: true });
-    const project = {
-      ...baseProject,
-      coverRef: baseProject.coverImageUrl || '',
-      coverImageUrl: baseProject.coverUrl || ''
-    };
-
-    const tracks = await Promise.all(trackResult.rows.map(async (track, index) => {
-      const audioKey = normalizeTrackStoragePath(
-        track.audio_key,
-        track.audio_path || track.storage_path || track.mp3_url
-      ) || '';
-      const audioPath =
-        normalizeTrackAudioPath(track.audio_path, audioKey, track.mp3_url) || audioKey || '';
-      const externalTrackUrl = audioKey
-        ? ''
-        : String(
-            normalizeTrackAudioUrl(
-              track.audio_url,
-              isAssetRef(track.mp3_url) ? '' : track.mp3_url
-            ) || ''
-          ).trim();
-      let signedPlayback = null;
-      if (audioKey) {
-        try {
-          signedPlayback = await resolveTrackPlaybackUrlFromStoragePath(audioKey);
-        } catch (error) {
-          console.error('[TRACK_SIGN_FAILED]', {
-            slug,
-            projectId: row.project_id,
-            trackId: track.track_id,
-            audioKey,
-            error: String(error?.message || error || 'unknown')
-          });
-        }
-      }
-      const audioUrl = String(signedPlayback?.url || externalTrackUrl || '').trim();
-      const audioUrlExpiresAt = signedPlayback?.expiresAt || null;
-      const trackNoValue = Number(track.track_no ?? track.sort_order ?? index + 1);
-      const trackNo = Number.isFinite(trackNoValue)
-        ? Math.max(1, Math.floor(trackNoValue))
-        : index + 1;
-      const sortOrderValue = Number(track.sort_order ?? trackNo);
-      const sortOrder = Number.isFinite(sortOrderValue)
-        ? Math.max(0, Math.floor(sortOrderValue))
-        : trackNo;
-
-      return {
-        trackId: track.track_id,
-        projectId: track.project_id,
-        title: track.title,
-        trackNo,
-        audioKey: audioKey || null,
-        storagePath: audioKey || audioPath || '',
-        storageBucket: audioKey ? (S3_BUCKET || '') : '',
-        audioPath,
-        audio_path: audioPath,
-        audioUrl,
-        audio_url: audioUrl,
-        audioUrlExpiresAt,
-        trackUrl: audioUrl || externalTrackUrl || '',
-        mp3Url: audioUrl || externalTrackUrl || '',
-        artworkUrl: track.artwork_url || '',
-        sortOrder,
-        createdAt: track.created_at
-      };
-    }));
-
-    const tracksMissingPlayableUrl = tracks.filter((track) => !String(track.audioUrl || '').trim());
-    if (tracks.length > 0 && tracksMissingPlayableUrl.length === tracks.length) {
-      console.error('[ALBUM_FETCH_NO_PLAYABLE_TRACKS]', {
-        slug,
-        projectId: row.project_id,
-        trackCount: tracks.length
-      });
-    } else if (tracksMissingPlayableUrl.length > 0) {
-      console.warn('[ALBUM_FETCH_TRACKS_MISSING_AUDIO]', {
-        slug,
-        projectId: row.project_id,
-        missingTrackIds: tracksMissingPlayableUrl.map((track) => track.trackId)
-      });
-    }
-    if (project.coverKey && !project.coverUrl) {
-      console.error('[ALBUM_FETCH_COVER_SIGN_FAILED]', {
-        slug,
-        projectId: row.project_id,
-        coverKey: project.coverKey
-      });
-    }
-
-    if (IS_DEV) {
-      console.log('[DEV] project fetch', {
-        slug,
-        projectId: row.project_id,
-        tracks: tracks.length,
-        trackUrlPresence: tracks.map((track) => ({
-          trackId: track.trackId,
-          hasTrackUrl: Boolean(String(track.trackUrl || '').trim()),
-          hasAudioUrl: Boolean(String(track.audioUrl || '').trim()),
-          hasMp3Url: Boolean(String(track.mp3Url || '').trim())
-        }))
-      });
-
-      const suspectUrls = [
-        project.coverUrl,
-        ...tracks.map((t) => t.audioUrl),
-        ...tracks.map((t) => t.trackUrl),
-        ...tracks.map((t) => t.artworkUrl)
-      ].filter(Boolean);
-      const hasLocalPaths = suspectUrls.some((url) => /^([a-zA-Z]:\\\\|file:|\\\\)/.test(url));
-      if (hasLocalPaths) {
-        console.log('[DEV] project asset warning: local file paths detected.');
+    if (allowAdminScope) {
+      const rowOwner = ownerUserIdFromData(row.data);
+      if (rowOwner !== ownerScope) {
+        return res.status(404).json({ message: 'Project not found.' });
       }
     }
 
+    const { project, tracks } = await buildProjectDetailPayload(row, {
+      lookupLabel: 'slug',
+      lookupValue: slug
+    });
+
+    res.set('Cache-Control', 'no-store');
     return res.json({
       success: true,
       project,
