@@ -497,16 +497,12 @@ const REQUIRED_R2_CORS_ORIGINS = Array.from(
     RAILWAY_ORIGIN
   ].filter(Boolean))
 );
-const ALLOWED_ORIGINS = new Set([
-  'http://localhost:5173',
-  'http://localhost:5174',
-  'http://127.0.0.1:5174',
-  'http://localhost:3000',
-  'http://localhost:3001',
-  APP_ORIGIN,
-  RAILWAY_ORIGIN,
-  'https://www.tapalbum.com'
-].filter(Boolean));
+const allowedOrigins = [
+  'https://tapalbum.com',
+  'https://www.tapalbum.com',
+  'https://tap-album-production-bfdb.up.railway.app',
+  'http://localhost:5173'
+];
 
 if (S3_BUCKET) {
   console.log('[R2_CORS_REQUIRED]', {
@@ -517,20 +513,17 @@ if (S3_BUCKET) {
   });
 }
 
-const CORS_ALLOW_ALL = process.env.CORS_ALLOW_ALL === 'true';
 app.set('trust proxy', 1);
-const corsOptions = {
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true);
-    if (CORS_ALLOW_ALL) return cb(null, true);
-    if (IS_DEV) return cb(null, true);
-    if (ALLOWED_ORIGINS.has(origin)) return cb(null, true);
-    return cb(new Error('Not allowed by CORS'));
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(null, true);
+    }
   },
   credentials: true
-};
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
+}));
 app.use(express.json());
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
@@ -1363,7 +1356,7 @@ app.get('/health', (_req, res) => {
     supabaseAuthClientConfigured: hasSupabaseAuthClientConfig(),
     supabaseAdminConfigured: hasSupabaseAdminConfig(),
     trackStorage: buildTrackStoragePayload(),
-    allowedOrigins: Array.from(ALLOWED_ORIGINS)
+    allowedOrigins
   });
 });
 
