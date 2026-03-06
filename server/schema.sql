@@ -39,6 +39,45 @@ WHERE a.project_id = b.project_id
 CREATE UNIQUE INDEX IF NOT EXISTS idx_access_records_project_email_unique
   ON access_records (project_id, email);
 
+CREATE TABLE IF NOT EXISTS access_sessions (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  email TEXT NOT NULL,
+  access_id TEXT REFERENCES access_records(id) ON DELETE CASCADE,
+  ip TEXT,
+  user_agent TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  revoked_at TIMESTAMPTZ
+);
+
+ALTER TABLE access_sessions
+  ADD COLUMN IF NOT EXISTS access_id TEXT REFERENCES access_records(id) ON DELETE CASCADE;
+
+ALTER TABLE access_sessions
+  ADD COLUMN IF NOT EXISTS ip TEXT;
+
+ALTER TABLE access_sessions
+  ADD COLUMN IF NOT EXISTS user_agent TEXT;
+
+ALTER TABLE access_sessions
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE access_sessions
+  ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE access_sessions
+  ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_access_sessions_project_email
+  ON access_sessions (project_id, email);
+
+CREATE INDEX IF NOT EXISTS idx_access_sessions_access
+  ON access_sessions (access_id);
+
+CREATE INDEX IF NOT EXISTS idx_access_sessions_project_recent
+  ON access_sessions (project_id, last_seen_at DESC, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS project_email_unlocks (
   project_id TEXT NOT NULL,
   email_normalized TEXT NOT NULL,

@@ -197,6 +197,16 @@ export const Api = {
         : undefined
     }),
 
+  getAccessSessions: (projectId: string, token?: string) =>
+    request(`/api/projects/${encodeURIComponent(projectId)}/access-sessions`, {
+      method: 'GET',
+      headers: token
+        ? {
+            Authorization: `Bearer ${token}`
+          }
+        : undefined
+    }),
+
   getProjectCoverUrl: (projectId: string, token?: string) =>
     request(`/api/projects/${encodeURIComponent(projectId)}/cover-url`, {
       method: 'GET',

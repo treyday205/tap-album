@@ -932,7 +932,7 @@ const getAccessRecord = async (projectId, email, client) => {
   return inserted.rows[0];
 };
 
-const issueVerifiedAccessToken = async (projectId, email) => {
+const issueVerifiedAccessToken = async (projectId, email, sessionContext = {}) => {
   if (!projectId || !email) {
     throw new Error('projectId and email are required.');
   }
@@ -949,12 +949,39 @@ const issueVerifiedAccessToken = async (projectId, email) => {
     [access.id]
   );
   const resolvedAccess = updated.rows[0] || access;
-  const token = jwt.sign({ email: access.email }, JWT_SECRET, { expiresIn: '365d' });
+  let sessionId = crypto.randomUUID();
+  try {
+    await query(
+      `INSERT INTO access_sessions (id, project_id, email, access_id, ip, user_agent, created_at, last_seen_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
+      [
+        sessionId,
+        resolvedAccess.project_id,
+        resolvedAccess.email,
+        resolvedAccess.id,
+        sessionContext?.ip || null,
+        sessionContext?.userAgent || null
+      ]
+    );
+  } catch (err) {
+    sessionId = null;
+    console.error('Access session create failed:', err);
+  }
+  const token = jwt.sign(
+    {
+      email: resolvedAccess.email,
+      projectId: resolvedAccess.project_id,
+      ...(sessionId ? { sid: sessionId } : {})
+    },
+    JWT_SECRET,
+    { expiresIn: '365d' }
+  );
   return {
     success: true,
     token,
     email: resolvedAccess.email,
     projectId: resolvedAccess.project_id,
+    sessionId,
     remaining: resolvedAccess.remaining,
     unlocked: Boolean(resolvedAccess.unlocked)
   };
@@ -1068,9 +1095,32 @@ const auth = (req, res, next) => {
   return next();
 };
 
-const getTokenEmail = (req) => {
-  const payload = getTokenPayload(req);
-  return payload?.email || null;
+const isPayloadScopedToProject = (payload, projectId) => {
+  const payloadProjectId = String(payload?.projectId || '').trim();
+  if (!payloadProjectId) return true;
+  return payloadProjectId === String(projectId || '').trim();
+};
+
+const touchAccessSession = async ({ sessionId, projectId, req }) => {
+  const safeSessionId = String(sessionId || '').trim();
+  const safeProjectId = String(projectId || '').trim();
+  if (!safeSessionId || !safeProjectId) return;
+  try {
+    await query(
+      `UPDATE access_sessions
+       SET last_seen_at = NOW(),
+           ip = COALESCE($3, ip),
+           user_agent = COALESCE($4, user_agent)
+       WHERE id = $1
+         AND project_id = $2
+         AND revoked_at IS NULL`,
+      [safeSessionId, safeProjectId, getRequestIp(req), getRequestUserAgent(req)]
+    );
+  } catch (err) {
+    if (IS_DEV) {
+      console.warn('Access session touch failed:', err?.message || err);
+    }
+  }
 };
 
 const isAdminRequest = (req) => {
@@ -1724,7 +1774,11 @@ app.post('/api/auth/supabase/exchange', async (req, res) => {
     if (!data.user.email_confirmed_at) {
       return res.status(401).json({ message: 'Email is not verified yet.' });
     }
-    const payload = await issueVerifiedAccessToken(projectId, data.user.email);
+    const payload = await issueVerifiedAccessToken(projectId, data.user.email, {
+      ip: getRequestIp(req),
+      userAgent: getRequestUserAgent(req),
+      source: 'supabase'
+    });
     return res.json(payload);
   } catch (err) {
     console.error('Supabase exchange failed:', err);
@@ -1871,7 +1925,11 @@ app.post('/api/auth/verify-magic', async (req, res) => {
     }
 
     await query('DELETE FROM magic_links WHERE id = $1', [verificationId]);
-    const payload = await issueVerifiedAccessToken(record.project_id, record.email);
+    const payload = await issueVerifiedAccessToken(record.project_id, record.email, {
+      ip: getRequestIp(req),
+      userAgent: getRequestUserAgent(req),
+      source: 'magic-link'
+    });
     if (IS_DEV) {
       console.log('[DEV] verify-magic success', {
         projectId: record.project_id,
@@ -1892,8 +1950,16 @@ app.post('/api/access/status', auth, async (req, res) => {
   if (!projectId) {
     return res.status(400).json({ message: 'projectId is required.' });
   }
+  if (!isPayloadScopedToProject(req.user, projectId)) {
+    return res.status(403).json({ message: 'Token is not valid for this album.' });
+  }
 
   try {
+    await touchAccessSession({
+      sessionId: req.user?.sid,
+      projectId,
+      req
+    });
     const projectCapacityStats = await getProjectCapacityStats(projectId);
     if (!projectCapacityStats) {
       return res.status(404).json({ message: 'Project not found.' });
@@ -1944,9 +2010,20 @@ app.post('/api/assets/sign', async (req, res) => {
     const emailGateEnabled = projectData.emailGateEnabled ?? true;
 
     const isAdmin = isAdminRequest(req);
+    const tokenPayload = getTokenPayload(req);
+    if (tokenPayload && !isPayloadScopedToProject(tokenPayload, safeProjectId)) {
+      return res.status(403).json({ message: 'Token is not valid for this album.' });
+    }
+    if (tokenPayload?.sid) {
+      await touchAccessSession({
+        sessionId: tokenPayload.sid,
+        projectId: safeProjectId,
+        req
+      });
+    }
     let isUnlocked = false;
     if (!IS_DEV && emailGateEnabled && !isAdmin) {
-      const email = getTokenEmail(req);
+      const email = tokenPayload?.email || null;
       if (email) {
         const accessResult = await query(
           'SELECT unlocked, verified FROM access_records WHERE project_id = $1 AND email = $2 LIMIT 1',
@@ -1995,9 +2072,17 @@ app.post('/api/pins/issue', auth, async (req, res) => {
   if (!projectId) {
     return res.status(400).json({ message: 'projectId is required.' });
   }
+  if (!isPayloadScopedToProject(req.user, projectId)) {
+    return res.status(403).json({ message: 'Token is not valid for this album.' });
+  }
 
   const client = await pool.connect();
   try {
+    await touchAccessSession({
+      sessionId: req.user?.sid,
+      projectId,
+      req
+    });
     await client.query('BEGIN');
     const accessRow = await client.query(
       'SELECT * FROM access_records WHERE project_id = $1 AND email = $2 FOR UPDATE',
@@ -2103,9 +2188,17 @@ app.post('/api/pins/verify', auth, async (req, res) => {
     }
     return res.status(400).json({ message: 'projectId and pin are required.' });
   }
+  if (!isPayloadScopedToProject(req.user, projectId)) {
+    return res.status(403).json({ message: 'Token is not valid for this album.' });
+  }
 
   const client = await pool.connect();
   try {
+    await touchAccessSession({
+      sessionId: req.user?.sid,
+      projectId,
+      req
+    });
     if (IS_DEV) {
       console.log('[DEV] pin-verify request', {
         projectId,
@@ -2259,6 +2352,7 @@ app.post('/api/projects', async (req, res) => {
       .filter(Boolean);
     if (ghostProjectIds.length > 0) {
       await query('DELETE FROM magic_links WHERE project_id = ANY($1::text[])', [ghostProjectIds]);
+      await query('DELETE FROM access_sessions WHERE project_id = ANY($1::text[])', [ghostProjectIds]);
       await query('DELETE FROM access_records WHERE project_id = ANY($1::text[])', [ghostProjectIds]);
       await query('DELETE FROM projects WHERE project_id = ANY($1::text[])', [ghostProjectIds]);
     }
@@ -2383,6 +2477,7 @@ app.delete('/api/projects/:projectId', async (req, res) => {
     }
 
     await client.query('DELETE FROM magic_links WHERE project_id = $1', [safeProjectId]);
+    await client.query('DELETE FROM access_sessions WHERE project_id = $1', [safeProjectId]);
     await client.query('DELETE FROM access_records WHERE project_id = $1', [safeProjectId]);
     await client.query('DELETE FROM projects WHERE project_id = $1', [safeProjectId]);
 
@@ -2502,6 +2597,76 @@ app.get('/api/projects/:projectId/unlock-activity', async (req, res) => {
   }
 });
 
+app.get('/api/projects/:projectId/access-sessions', async (req, res) => {
+  const safeProjectId = safeSegment(req.params.projectId);
+  if (!safeProjectId) {
+    return res.status(400).json({ message: 'projectId is required.' });
+  }
+  if (!IS_DEV && !isAdminRequest(req)) {
+    return res.status(401).json({ message: 'Admin token required.' });
+  }
+  const ownerScope = IS_DEV ? ADMIN_OWNER_USER_ID : getAdminOwnerScope(req);
+  if (!ownerScope) {
+    return res.status(401).json({ message: 'Admin owner scope is required.' });
+  }
+
+  try {
+    const ownerResult = await query(
+      'SELECT data FROM projects WHERE project_id = $1 LIMIT 1',
+      [safeProjectId]
+    );
+    if (ownerResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+    const rowOwner = ownerUserIdFromData(ownerResult.rows[0].data);
+    if (rowOwner !== ownerScope) {
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+
+    const sessionsResult = await query(
+      `SELECT s.id AS session_id,
+              s.project_id,
+              s.email,
+              s.access_id,
+              s.created_at,
+              s.last_seen_at,
+              s.ip,
+              s.user_agent,
+              ar.verified,
+              ar.unlocked
+       FROM access_sessions s
+       LEFT JOIN access_records ar ON ar.id = s.access_id
+       WHERE s.project_id = $1
+         AND s.revoked_at IS NULL
+         AND COALESCE(ar.verified, true) = true
+       ORDER BY s.last_seen_at DESC NULLS LAST, s.created_at DESC
+       LIMIT 200`,
+      [safeProjectId]
+    );
+
+    res.set('Cache-Control', 'no-store');
+    return res.json({
+      success: true,
+      projectId: safeProjectId,
+      sessions: sessionsResult.rows.map((row) => ({
+        projectId: row.project_id,
+        email: row.email,
+        verified: Boolean(row.verified ?? true),
+        unlocked: Boolean(row.unlocked ?? false),
+        sessionId: row.session_id,
+        accessId: row.access_id || null,
+        createdAt: row.created_at,
+        lastUsedAt: row.last_seen_at || row.created_at,
+        ip: row.ip || null,
+        userAgent: row.user_agent || null
+      }))
+    });
+  } catch (err) {
+    console.error('Access sessions fetch failed:', err);
+    return res.status(500).json({ message: 'Unable to load access sessions.' });
+  }
+});
+
 app.post('/api/projects/:projectId/rotate-pins', async (req, res) => {
   const safeProjectId = safeSegment(req.params.projectId);
   if (!safeProjectId) {
@@ -2590,6 +2755,7 @@ app.post('/api/projects/:projectId/invalidate-sessions', async (req, res) => {
     }
 
     await client.query('DELETE FROM magic_links WHERE project_id = $1', [safeProjectId]);
+    await client.query('DELETE FROM access_sessions WHERE project_id = $1', [safeProjectId]);
     await client.query('DELETE FROM access_records WHERE project_id = $1', [safeProjectId]);
     await client.query('UPDATE projects SET pin_unlock_count = 0, pin_active_count = 0 WHERE project_id = $1', [safeProjectId]);
     await client.query('COMMIT');
@@ -3231,6 +3397,7 @@ app.post('/api/projects/sync', async (req, res) => {
 
     if (resetSecurity) {
       await client.query('DELETE FROM magic_links WHERE project_id = $1', [payload.projectId]);
+      await client.query('DELETE FROM access_sessions WHERE project_id = $1', [payload.projectId]);
       await client.query('DELETE FROM access_records WHERE project_id = $1', [payload.projectId]);
     }
 

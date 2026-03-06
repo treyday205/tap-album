@@ -13,6 +13,7 @@ import { GoogleGenAI } from "@google/genai";
 import { isAssetRef, resolveAssetUrl } from '../services/assets';
 import { collectBankRefs, resolveBankUrls } from '../services/assetBank';
 import ResponsiveImage from '../components/ResponsiveImage';
+import { getProjectAccessToken } from '../services/albumAccessSession';
 
 const WalletPage: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
@@ -78,7 +79,7 @@ const WalletPage: React.FC = () => {
       if (assetUrls[project.coverImageUrl]) return;
       if (signedCoverRequestsRef.current.has(project.coverImageUrl)) return;
       signedCoverRequestsRef.current.add(project.coverImageUrl);
-      const token = localStorage.getItem('tap_auth_token') || undefined;
+      const token = getProjectAccessToken(project.projectId) || undefined;
       try {
         const response = await Api.signAssets(project.projectId, [project.coverImageUrl], token || undefined);
         const next = { ...assetUrls };

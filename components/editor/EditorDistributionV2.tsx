@@ -1,4 +1,4 @@
-import React, { memo } from 'react';
+import React, { memo, useMemo, useState } from 'react';
 import { AlertTriangle, ShieldAlert, Loader2, RotateCw, RefreshCcw, Activity, Pause, Play } from 'lucide-react';
 import { Project } from '../../types';
 
@@ -18,6 +18,19 @@ type UnlockActivity = {
   userAgent?: string | null;
 };
 
+type AccessSessionEntry = {
+  projectId: string;
+  email: string;
+  verified: boolean;
+  unlocked: boolean;
+  sessionId: string;
+  accessId?: string | null;
+  createdAt: string | null;
+  lastUsedAt: string | null;
+  ip?: string | null;
+  userAgent?: string | null;
+};
+
 type EditorDistributionV2Props = {
   project: Project;
   effectiveProjectSecurityStats: SecurityStats;
@@ -26,6 +39,9 @@ type EditorDistributionV2Props = {
   unlockActivity: UnlockActivity[];
   unlockActivityLoading: boolean;
   unlockActivityError: string | null;
+  accessSessions: AccessSessionEntry[];
+  accessSessionsLoading: boolean;
+  accessSessionsError: string | null;
   onSaveProject: (updates: Partial<Project>) => void;
   onRotatePins: () => void;
   onResetCounters: () => void;
@@ -58,6 +74,23 @@ const formatTimestamp = (value?: string | null) => {
   return date.toLocaleString();
 };
 
+const toTimestamp = (value?: string | null) => {
+  const ms = new Date(String(value || '')).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+};
+
+const deviceFromUserAgent = (ua?: string | null) => {
+  const lowered = String(ua || '').toLowerCase();
+  if (!lowered) return 'Unknown Device';
+  if (lowered.includes('iphone')) return 'iPhone';
+  if (lowered.includes('ipad')) return 'iPad';
+  if (lowered.includes('android')) return 'Android';
+  if (lowered.includes('mac')) return 'Mac';
+  if (lowered.includes('windows')) return 'Windows';
+  if (lowered.includes('linux')) return 'Linux';
+  return 'Unknown Device';
+};
+
 const EditorDistributionV2: React.FC<EditorDistributionV2Props> = ({
   project,
   effectiveProjectSecurityStats,
@@ -66,10 +99,20 @@ const EditorDistributionV2: React.FC<EditorDistributionV2Props> = ({
   unlockActivity,
   unlockActivityLoading,
   unlockActivityError,
+  accessSessions,
+  accessSessionsLoading,
+  accessSessionsError,
   onSaveProject,
   onRotatePins,
   onResetCounters
 }) => {
+  const [sessionEmailQuery, setSessionEmailQuery] = useState('');
+  const [sessionLast24Only, setSessionLast24Only] = useState(false);
+  const [sessionSort, setSessionSort] = useState<'lastUsed' | 'created'>('lastUsed');
+  const hasActiveSessionFilters =
+    String(sessionEmailQuery || '').trim().length > 0 ||
+    sessionLast24Only ||
+    sessionSort !== 'lastUsed';
   const distributionMode = project.distributionMode || 'open';
   const dropStatus = project.distributionStatus || 'live';
 
@@ -105,6 +148,42 @@ const EditorDistributionV2: React.FC<EditorDistributionV2Props> = ({
   const handleStatusChange = (status: typeof statusOptions[number]['id']) => {
     onSaveProject({ distributionStatus: status });
   };
+
+  const resetSessionFilters = () => {
+    setSessionEmailQuery('');
+    setSessionLast24Only(false);
+    setSessionSort('lastUsed');
+  };
+
+  const filteredAccessSessions = useMemo(() => {
+    const query = String(sessionEmailQuery || '').trim().toLowerCase();
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    return [...accessSessions]
+      .filter((entry) => {
+        const email = String(entry.email || '').toLowerCase();
+        if (query && !email.includes(query)) {
+          return false;
+        }
+        if (sessionLast24Only) {
+          const lastUsedMs = toTimestamp(entry.lastUsedAt);
+          if (lastUsedMs <= 0 || lastUsedMs < cutoff) {
+            return false;
+          }
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        if (sessionSort === 'created') {
+          return toTimestamp(b.createdAt) - toTimestamp(a.createdAt);
+        }
+        const aLastUsed = toTimestamp(a.lastUsedAt) || toTimestamp(a.createdAt);
+        const bLastUsed = toTimestamp(b.lastUsedAt) || toTimestamp(b.createdAt);
+        if (bLastUsed !== aLastUsed) {
+          return bLastUsed - aLastUsed;
+        }
+        return toTimestamp(b.createdAt) - toTimestamp(a.createdAt);
+      });
+  }, [accessSessions, sessionEmailQuery, sessionLast24Only, sessionSort]);
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300 pb-10">
@@ -334,6 +413,128 @@ const EditorDistributionV2: React.FC<EditorDistributionV2Props> = ({
                       {entry.ip || 'Unknown'}
                     </p>
                   </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="p-5 bg-slate-900/40 rounded-3xl border border-slate-800/50">
+        <div className="flex items-center justify-between mb-4">
+          <h4 className="text-xs font-black uppercase tracking-widest text-green-500">Access Session Audit</h4>
+          {accessSessionsLoading && <Loader2 size={16} className="animate-spin text-slate-400" />}
+        </div>
+
+        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-4">
+          Read-only session log for this album release.
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4">
+          <input
+            type="text"
+            value={sessionEmailQuery}
+            onChange={(e) => setSessionEmailQuery(e.target.value)}
+            placeholder="Filter by email..."
+            className="w-full bg-slate-900/70 border border-slate-700 rounded-xl px-3 py-2 text-xs font-bold text-white placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-green-500"
+          />
+          <select
+            value={sessionSort}
+            onChange={(e) => setSessionSort(e.target.value === 'created' ? 'created' : 'lastUsed')}
+            className="w-full bg-slate-900/70 border border-slate-700 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:ring-1 focus:ring-green-500"
+          >
+            <option value="lastUsed">Sort: Most Recently Used</option>
+            <option value="created">Sort: Newest Created</option>
+          </select>
+          <label className="flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-700 bg-slate-900/70 text-[10px] font-black uppercase tracking-widest text-slate-300">
+            <input
+              type="checkbox"
+              checked={sessionLast24Only}
+              onChange={(e) => setSessionLast24Only(e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-slate-600 bg-slate-800 text-green-500 focus:ring-green-500"
+            />
+            Last Used 24h
+          </label>
+          <button
+            type="button"
+            onClick={resetSessionFilters}
+            disabled={!hasActiveSessionFilters}
+            className={`px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-colors ${
+              hasActiveSessionFilters
+                ? 'border-slate-600 bg-slate-800/80 text-slate-100 hover:bg-slate-800'
+                : 'border-slate-700 bg-slate-900/60 text-slate-500 cursor-not-allowed'
+            }`}
+          >
+            Clear Filters
+          </button>
+        </div>
+
+        {!accessSessionsLoading && (
+          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-4">
+            Showing {filteredAccessSessions.length} of {accessSessions.length} sessions.
+          </p>
+        )}
+
+        {accessSessionsError && (
+          <div className="flex items-center gap-2 text-red-400 text-[10px] font-black uppercase tracking-widest mb-3">
+            <AlertTriangle size={14} />
+            {accessSessionsError}
+          </div>
+        )}
+
+        {filteredAccessSessions.length === 0 && !accessSessionsLoading && (
+          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+            No access sessions match the current filters.
+          </p>
+        )}
+
+        {filteredAccessSessions.length > 0 && (
+          <div className="space-y-3">
+            {filteredAccessSessions.map((entry) => (
+              <div
+                key={entry.sessionId}
+                className="p-3 rounded-2xl bg-slate-800/50 border border-slate-700"
+              >
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Verified Email</p>
+                    <p className="text-xs font-bold text-white break-all">{entry.email}</p>
+                    <p className="mt-2 text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+                      {deviceFromUserAgent(entry.userAgent)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Session ID</p>
+                    <p className="text-xs font-mono font-bold text-slate-200 break-all">{entry.sessionId || '--'}</p>
+                    <p className="mt-2 text-[10px] text-slate-500 font-bold uppercase tracking-widest">
+                      Access ID: <span className="font-mono text-slate-300">{entry.accessId || '--'}</span>
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Album / Project</p>
+                    <p className="text-xs font-mono font-bold text-slate-200">{entry.projectId || project.projectId}</p>
+                    <p className="mt-2 text-[10px] text-slate-500 font-bold uppercase tracking-widest">
+                      Created: {formatTimestamp(entry.createdAt)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Last Used</p>
+                    <p className="text-xs font-bold text-white">{formatTimestamp(entry.lastUsedAt)}</p>
+                    <p className="mt-2 text-[10px] text-slate-500 font-bold uppercase tracking-widest">
+                      IP: {entry.ip || 'Unknown'}
+                    </p>
+                    <p className="mt-1 text-[10px] text-slate-500 font-bold uppercase tracking-widest break-all">
+                      UA: {entry.userAgent || 'Unknown'}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2 mt-3">
+                  <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded-full ${entry.verified ? 'bg-green-500/10 text-green-300' : 'bg-slate-700 text-slate-300'}`}>
+                    {entry.verified ? 'Verified' : 'Unverified'}
+                  </span>
+                  <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded-full ${entry.unlocked ? 'bg-blue-500/10 text-blue-300' : 'bg-slate-700 text-slate-300'}`}>
+                    {entry.unlocked ? 'Unlocked' : 'Locked'}
+                  </span>
                 </div>
               </div>
             ))}

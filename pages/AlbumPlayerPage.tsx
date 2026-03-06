@@ -8,22 +8,11 @@ import {
 } from '../services/albumData';
 import { Api } from '../services/api';
 import AlbumPlayerExperience from '../components/album/AlbumPlayerExperience';
+import { getProjectAccessToken, normalizeProjectId } from '../services/albumAccessSession';
 
 type PageState = 'loading' | 'ready' | 'not-found';
 
-const AUTH_TOKEN_KEY = 'tap_auth_token';
-const scopedAuthTokenKey = (projectId: string) => `${AUTH_TOKEN_KEY}_${projectId}`;
-const normalizeProjectId = (value?: string | null) => String(value || '').trim();
 const toSecureEntryPath = (slug: string) => `/${encodeURIComponent(slug)}`;
-
-const getStoredAuthToken = (projectId?: string | null) => {
-  const normalizedProjectId = normalizeProjectId(projectId);
-  if (normalizedProjectId) {
-    const scopedToken = localStorage.getItem(scopedAuthTokenKey(normalizedProjectId));
-    if (scopedToken) return scopedToken;
-  }
-  return localStorage.getItem(AUTH_TOKEN_KEY);
-};
 
 const AlbumPlayerPage: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
@@ -50,7 +39,7 @@ const AlbumPlayerPage: React.FC = () => {
         const gateEnabled = projectResponse?.project?.emailGateEnabled ?? true;
         if (gateEnabled) {
           const projectId = normalizeProjectId(projectResponse?.project?.projectId);
-          const token = getStoredAuthToken(projectId);
+          const token = getProjectAccessToken(projectId);
           if (!projectId || !token) {
             navigate(toSecureEntryPath(normalizedSlug), { replace: true });
             return;

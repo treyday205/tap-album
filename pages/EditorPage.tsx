@@ -124,6 +124,22 @@ const EditorPage: React.FC = () => {
   const [unlockActivity, setUnlockActivity] = useState<Array<{ email: string; unlockedAt: string | null; ip?: string | null; userAgent?: string | null }>>([]);
   const [unlockActivityLoading, setUnlockActivityLoading] = useState(false);
   const [unlockActivityError, setUnlockActivityError] = useState<string | null>(null);
+  const [accessSessions, setAccessSessions] = useState<
+    Array<{
+      projectId: string;
+      email: string;
+      verified: boolean;
+      unlocked: boolean;
+      sessionId: string;
+      accessId?: string | null;
+      createdAt: string | null;
+      lastUsedAt: string | null;
+      ip?: string | null;
+      userAgent?: string | null;
+    }>
+  >([]);
+  const [accessSessionsLoading, setAccessSessionsLoading] = useState(false);
+  const [accessSessionsError, setAccessSessionsError] = useState<string | null>(null);
   const [syncTick, setSyncTick] = useState(0);
   const syncTimeoutRef = useRef<number | null>(null);
   const toastTimeoutRef = useRef<number | null>(null);
@@ -407,6 +423,25 @@ const EditorPage: React.FC = () => {
       })
       .finally(() => setUnlockActivityLoading(false));
   }, [SECURITY_V2_ENABLED, activeTab, project?.projectId, syncTick]);
+
+  useEffect(() => {
+    if (activeTab !== 'security' || !project) return;
+    const adminToken = localStorage.getItem('tap_admin_token') || undefined;
+    if (!adminToken && !import.meta.env.DEV) {
+      setAccessSessionsError('Admin token required to load access sessions.');
+      setAccessSessions([]);
+      return;
+    }
+    setAccessSessionsLoading(true);
+    setAccessSessionsError(null);
+    Api.getAccessSessions(project.projectId, adminToken)
+      .then((data) => setAccessSessions(Array.isArray(data?.sessions) ? data.sessions : []))
+      .catch((err) => {
+        setAccessSessions([]);
+        setAccessSessionsError(err.message || 'Unable to load access sessions.');
+      })
+      .finally(() => setAccessSessionsLoading(false));
+  }, [activeTab, project?.projectId, syncTick]);
 
   const resolveAsset = useCallback((value: string) => resolveAssetUrl(value, assetUrls), [assetUrls]);
 
@@ -1924,6 +1959,9 @@ const EditorPage: React.FC = () => {
                     unlockActivity={unlockActivity}
                     unlockActivityLoading={unlockActivityLoading}
                     unlockActivityError={unlockActivityError}
+                    accessSessions={accessSessions}
+                    accessSessionsLoading={accessSessionsLoading}
+                    accessSessionsError={accessSessionsError}
                     onSaveProject={handleSaveProject}
                     onResetCounters={handleResetCounters}
                     onRotatePins={handleRotatePins}
@@ -1938,6 +1976,9 @@ const EditorPage: React.FC = () => {
                     accessError={accessError}
                     authEmail={localStorage.getItem('tap_auth_email')}
                     hasAuthToken={Boolean(localStorage.getItem('tap_auth_token'))}
+                    accessSessions={accessSessions}
+                    accessSessionsLoading={accessSessionsLoading}
+                    accessSessionsError={accessSessionsError}
                     onRetrySecurityStats={handleRetrySecurityStats}
                     onRetryAccessStatus={handleRetryAccessStatus}
                   />

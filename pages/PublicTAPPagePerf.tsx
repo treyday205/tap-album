@@ -24,19 +24,22 @@ import {
   isSupabaseAuthEnabled,
   supabaseAuthClient
 } from '../services/supabaseAuth';
+import {
+  clearProjectAccessSessions,
+  getActiveProjectAccessEmail,
+  getProjectAccessToken,
+  listProjectAccessEmails,
+  normalizeEmailIdentity,
+  normalizeProjectId,
+  removeProjectAccessSession,
+  setActiveProjectAccessEmail,
+  upsertProjectAccessSession
+} from '../services/albumAccessSession';
 
 const TAPRenderer = lazy(() => import('../components/TAPRenderer'));
 
 
-const AUTH_TOKEN_KEY = 'tap_auth_token';
-const AUTH_EMAIL_KEY = 'tap_auth_email';
 const IS_DEV = import.meta.env.DEV;
-const AUTH_TOKEN_PREFIX = `${AUTH_TOKEN_KEY}_`;
-const AUTH_EMAIL_PREFIX = `${AUTH_EMAIL_KEY}_`;
-const UNLOCKED_KEY_PREFIX = 'tap_unlocked_';
-const scopedAuthTokenKey = (projectId: string) => `${AUTH_TOKEN_KEY}_${projectId}`;
-const scopedAuthEmailKey = (projectId: string) => `${AUTH_EMAIL_KEY}_${projectId}`;
-const normalizeProjectId = (value?: string | null) => String(value || '').trim();
 const PUBLIC_CACHE_PREFIX = 'tap_public_cache_';
 
 type BeforeInstallPromptEvent = Event & {
@@ -145,60 +148,26 @@ const PublicTAPPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
 
   const getAuthToken = (projectId?: string | null) => {
-    const normalizedProjectId = normalizeProjectId(projectId);
-    if (normalizedProjectId) {
-      const scoped = localStorage.getItem(scopedAuthTokenKey(normalizedProjectId));
-      if (scoped) return scoped;
-    }
-    return localStorage.getItem(AUTH_TOKEN_KEY);
+    return getProjectAccessToken(projectId);
   };
 
   const getAuthEmail = (projectId?: string | null) => {
-    const normalizedProjectId = normalizeProjectId(projectId);
-    if (normalizedProjectId) {
-      const scoped = localStorage.getItem(scopedAuthEmailKey(normalizedProjectId));
-      if (scoped) return scoped;
-    }
-    return localStorage.getItem(AUTH_EMAIL_KEY);
+    return getActiveProjectAccessEmail(projectId);
   };
 
   const setAuthPayload = (projectId: string | null | undefined, token: string, authEmail: string) => {
-    const normalizedProjectId = normalizeProjectId(projectId);
-    if (normalizedProjectId) {
-      localStorage.setItem(scopedAuthTokenKey(normalizedProjectId), token);
-      localStorage.setItem(scopedAuthEmailKey(normalizedProjectId), authEmail);
-    }
-    localStorage.setItem(AUTH_TOKEN_KEY, token);
-    localStorage.setItem(AUTH_EMAIL_KEY, authEmail);
+    upsertProjectAccessSession(projectId, authEmail, token);
   };
 
-  const clearAuthPayload = (projectId?: string | null) => {
+  const clearAuthPayload = (projectId?: string | null, emailOverride?: string | null) => {
     const normalizedProjectId = normalizeProjectId(projectId);
-    if (normalizedProjectId) {
-      localStorage.removeItem(scopedAuthTokenKey(normalizedProjectId));
-      localStorage.removeItem(scopedAuthEmailKey(normalizedProjectId));
-      localStorage.removeItem(`${UNLOCKED_KEY_PREFIX}${normalizedProjectId}`);
+    const normalizedEmail = normalizeEmailIdentity(emailOverride);
+    if (!normalizedProjectId) return;
+    if (normalizedEmail) {
+      removeProjectAccessSession(normalizedProjectId, normalizedEmail);
+      return;
     }
-    localStorage.removeItem(AUTH_TOKEN_KEY);
-    localStorage.removeItem(AUTH_EMAIL_KEY);
-  };
-
-  const clearAllAuthStorage = () => {
-    const keysToRemove: string[] = [];
-    for (let i = 0; i < localStorage.length; i += 1) {
-      const key = localStorage.key(i);
-      if (!key) continue;
-      if (
-        key === AUTH_TOKEN_KEY ||
-        key === AUTH_EMAIL_KEY ||
-        key.startsWith(AUTH_TOKEN_PREFIX) ||
-        key.startsWith(AUTH_EMAIL_PREFIX) ||
-        key.startsWith(UNLOCKED_KEY_PREFIX)
-      ) {
-        keysToRemove.push(key);
-      }
-    }
-    keysToRemove.forEach((key) => localStorage.removeItem(key));
+    clearProjectAccessSessions(normalizedProjectId);
   };
 
   const clearAuthCookies = () => {
@@ -208,12 +177,7 @@ const PublicTAPPage: React.FC = () => {
       .map((entry) => entry.split('=')[0]?.trim())
       .filter(Boolean);
     names.forEach((name) => {
-      if (
-        name === AUTH_TOKEN_KEY ||
-        name === AUTH_EMAIL_KEY ||
-        name.startsWith('tap_') ||
-        name.startsWith('sb-')
-      ) {
+      if (name.startsWith('tap_auth_') || name.startsWith('sb-')) {
         document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
         if (typeof window !== 'undefined' && window.location?.hostname) {
           document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=${window.location.hostname}`;
@@ -734,7 +698,7 @@ const PublicTAPPage: React.FC = () => {
         }
       } catch (err) {
         if (canceled) return;
-        clearAuthPayload(project.projectId);
+        clearAuthPayload(project.projectId, getAuthEmail(project.projectId));
         lastSupabaseAccessTokenRef.current = null;
         setIsUnlocked(false);
       }
@@ -991,16 +955,13 @@ const PublicTAPPage: React.FC = () => {
     setStep('email');
   };
 
-  const resetAuth = (projectIdOverride?: string | null) => {
+  const resetAuth = (projectIdOverride?: string | null, emailOverride?: string | null) => {
     const effectiveProjectId = normalizeProjectId(projectIdOverride || project?.projectId || routeProjectId);
-    clearAuthPayload(effectiveProjectId || null);
-    clearAllAuthStorage();
+    const effectiveEmail = normalizeEmailIdentity(emailOverride || getAuthEmail(effectiveProjectId));
+    clearAuthPayload(effectiveProjectId || null, effectiveEmail || null);
     clearAuthCookies();
     lastSupabaseAccessTokenRef.current = null;
     supabaseExchangeInFlightRef.current = null;
-    if (supabaseAuthClient) {
-      void supabaseAuthClient.auth.signOut();
-    }
     setIssuedPin(null);
     setPinInput('');
     setRemaining(null);
@@ -1069,22 +1030,27 @@ const PublicTAPPage: React.FC = () => {
     setShowModal(true);
   };
 
-  const handleContinueAsCachedEmail = async () => {
+  const handleContinueAsSavedEmail = async (savedEmail?: string | null) => {
     const effectiveProjectId = project?.projectId || routeProjectId;
     if (!effectiveProjectId) {
       openModal();
       return;
     }
 
-    const cachedEmail = String(getAuthEmail(effectiveProjectId) || '').trim().toLowerCase();
+    const cachedEmail = normalizeEmailIdentity(savedEmail || getAuthEmail(effectiveProjectId));
+    if (!cachedEmail) {
+      openModal();
+      return;
+    }
+    setActiveProjectAccessEmail(effectiveProjectId, cachedEmail);
     logSessionPath({
-      source: 'continue_as_cached_email',
+      source: 'continue_as_saved_email',
       sessionReuse: true,
       cachedEmail,
       typedEmail: null
     });
 
-    let token = getAuthToken(effectiveProjectId);
+    let token = getProjectAccessToken(effectiveProjectId, cachedEmail);
     if (!token) {
       token = await ensureAppToken(effectiveProjectId);
     }
@@ -1099,15 +1065,16 @@ const PublicTAPPage: React.FC = () => {
       const status = await Api.getAccessStatus(effectiveProjectId, token);
       setRemaining(status.remaining ?? null);
       if (status?.verified) {
+        setActiveProjectAccessEmail(effectiveProjectId, cachedEmail);
         setIsUnlocked(true);
         setShowModal(false);
         resetModal();
         return;
       }
-      resetAuth(effectiveProjectId);
+      resetAuth(effectiveProjectId, cachedEmail);
       openModal();
     } catch {
-      resetAuth(effectiveProjectId);
+      resetAuth(effectiveProjectId, cachedEmail);
       openModal();
     }
   };
@@ -1142,11 +1109,6 @@ const PublicTAPPage: React.FC = () => {
 
     try {
       setEmail(normalizedEmail);
-      const currentEmail = String(getAuthEmail(project.projectId) || '').trim().toLowerCase();
-      if (currentEmail && currentEmail !== normalizedEmail) {
-        clearAuthPayload(project.projectId);
-        lastSupabaseAccessTokenRef.current = null;
-      }
       if (IS_DEV) {
         console.log('[DEBUG] request-magic start', {
           apiBaseUrl: API_BASE_URL,
@@ -1494,7 +1456,7 @@ const PublicTAPPage: React.FC = () => {
     );
   }
 
-  const cachedSessionEmail = String(getAuthEmail(project.projectId) || '').trim().toLowerCase();
+  const savedSessionEmails = listProjectAccessEmails(project.projectId);
 
   if (!isUnlocked) {
     return (
@@ -1512,7 +1474,7 @@ const PublicTAPPage: React.FC = () => {
             </div>
             <h1 className="text-4xl font-black tracking-tight text-white mb-3">Secure Entry</h1>
             <p className="text-slate-500 text-xs font-bold uppercase tracking-[0.2em] max-w-[240px] leading-relaxed">
-              Verify your email to unlock this album.
+              Each listener can verify their own email to unlock this Tap-Album.
             </p>
             <p className="text-[10px] text-slate-600 font-bold uppercase tracking-[0.2em] mt-4">
               {remaining !== null ? `Remaining PIN uses: ${remaining}` : 'Up to 1,000,000 PIN uses per email'}
@@ -1524,18 +1486,19 @@ const PublicTAPPage: React.FC = () => {
             className="w-full min-h-[56px] px-4 rounded-3xl font-black text-xs uppercase tracking-[0.24em] flex items-center justify-center gap-3 transition-all bg-green-500 text-black shadow-xl shadow-green-500/20 active:scale-95 touch-manipulation"
           >
             <Mail size={18} />
-            Continue with a Different Email
+            Verify an Email
             <ArrowRight size={18} />
           </button>
-          {cachedSessionEmail && (
+          {savedSessionEmails.map((savedEmail, index) => (
             <button
+              key={savedEmail}
               type="button"
-              onClick={() => void handleContinueAsCachedEmail()}
-              className="mt-3 w-full min-h-[48px] px-4 rounded-2xl font-black text-[10px] uppercase tracking-[0.2em] flex items-center justify-center transition-all bg-slate-800/60 text-slate-200 hover:bg-slate-800 touch-manipulation"
+              onClick={() => void handleContinueAsSavedEmail(savedEmail)}
+              className={`${index === 0 ? 'mt-3' : 'mt-2'} w-full min-h-[48px] px-4 rounded-2xl font-black text-[10px] uppercase tracking-[0.2em] flex items-center justify-center transition-all bg-slate-800/60 text-slate-200 hover:bg-slate-800 touch-manipulation`}
             >
-              Continue as {cachedSessionEmail}
+              Continue as {savedEmail}
             </button>
-          )}
+          ))}
 
           <div className="mt-16 pt-8 border-t border-white/5">
             <p className="text-[9px] font-bold text-slate-700 uppercase tracking-[0.4em] leading-relaxed">
@@ -1549,7 +1512,7 @@ const PublicTAPPage: React.FC = () => {
           <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/90 backdrop-blur-md p-0 sm:p-6">
             <div className="w-full sm:max-w-md bg-slate-900 rounded-t-[30px] sm:rounded-[32px] border border-slate-800 p-6 sm:p-8 text-left max-h-[92dvh] overflow-y-auto tap-native-scroll tap-safe-bottom">
               <div className="flex items-center justify-between mb-6">
-                <h2 className="text-xl font-black">Verify Ownership</h2>
+                <h2 className="text-xl font-black">Verify Your Email</h2>
                 <button onClick={closeModal} className="w-10 h-10 flex items-center justify-center text-slate-500 hover:text-white bg-slate-800/70 rounded-full touch-manipulation">×</button>
               </div>
 
@@ -1557,6 +1520,9 @@ const PublicTAPPage: React.FC = () => {
                 <form onSubmit={handleRequestMagic} className="space-y-5">
                   <div>
                     <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Email</label>
+                    <p className="mb-2 text-[10px] text-slate-500 font-bold uppercase tracking-[0.16em] leading-relaxed">
+                      Verify any buyer email. Access is saved per album and per email.
+                    </p>
                     <input
                       type="email"
                       value={email}
@@ -1578,7 +1544,7 @@ const PublicTAPPage: React.FC = () => {
                     className="w-full min-h-[52px] px-4 rounded-2xl font-black text-xs uppercase tracking-[0.24em] flex items-center justify-center gap-3 transition-all bg-green-500 text-black shadow-xl shadow-green-500/20 active:scale-95 touch-manipulation"
                   >
                     {isSending ? <Loader2 size={18} className="animate-spin" /> : <Mail size={18} />}
-                    Send Magic Link
+                    Send Verification Link
                   </button>
                 </form>
               )}
