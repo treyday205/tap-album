@@ -4,12 +4,20 @@ const AUTH_TOKEN_PREFIX = `${AUTH_TOKEN_KEY}_`;
 const AUTH_EMAIL_PREFIX = `${AUTH_EMAIL_KEY}_`;
 const PROJECT_SESSION_PREFIX = 'tap_access_sessions_';
 const PROJECT_ACTIVE_EMAIL_PREFIX = 'tap_access_active_email_';
+const PROJECT_PWA_SESSION_PREFIX = 'tap_pwa_session_';
 const UNLOCKED_KEY_PREFIX = 'tap_unlocked_';
 
 export type AlbumAccessSession = {
   email: string;
   token: string;
   updatedAt: string;
+};
+
+export type ProjectPwaSession = {
+  email: string;
+  verifiedAt: string;
+  installedAt?: string | null;
+  lastOpenedAt?: string | null;
 };
 
 const hasStorage = () => typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
@@ -19,6 +27,7 @@ export const normalizeEmailIdentity = (value?: string | null) => String(value ||
 
 const getSessionKey = (projectId: string) => `${PROJECT_SESSION_PREFIX}${projectId}`;
 const getActiveEmailKey = (projectId: string) => `${PROJECT_ACTIVE_EMAIL_PREFIX}${projectId}`;
+const getPwaSessionKey = (projectId: string) => `${PROJECT_PWA_SESSION_PREFIX}${projectId}`;
 const getScopedLegacyTokenKey = (projectId: string) => `${AUTH_TOKEN_KEY}_${projectId}`;
 const getScopedLegacyEmailKey = (projectId: string) => `${AUTH_EMAIL_KEY}_${projectId}`;
 
@@ -95,6 +104,23 @@ const removeLegacyCompatValues = (projectId: string) => {
   localStorage.removeItem(getScopedLegacyTokenKey(normalizedProjectId));
   localStorage.removeItem(getScopedLegacyEmailKey(normalizedProjectId));
   localStorage.removeItem(`${UNLOCKED_KEY_PREFIX}${normalizedProjectId}`);
+};
+
+const parsePwaSession = (raw: string | null): ProjectPwaSession | null => {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    const email = normalizeEmailIdentity((parsed as any)?.email);
+    if (!email) return null;
+    return {
+      email,
+      verifiedAt: String((parsed as any)?.verifiedAt || new Date().toISOString()),
+      installedAt: (parsed as any)?.installedAt ? String((parsed as any).installedAt) : null,
+      lastOpenedAt: (parsed as any)?.lastOpenedAt ? String((parsed as any).lastOpenedAt) : null
+    };
+  } catch {
+    return null;
+  }
 };
 
 const migrateLegacySession = (projectId: string) => {
@@ -201,6 +227,68 @@ export const upsertProjectAccessSession = (
   setLegacyCompatValues(normalizedProjectId, normalizedToken, normalizedEmail);
 };
 
+export const getProjectPwaSession = (projectId?: string | null): ProjectPwaSession | null => {
+  if (!hasStorage()) return null;
+  const normalizedProjectId = normalizeProjectId(projectId);
+  if (!normalizedProjectId) return null;
+  return parsePwaSession(localStorage.getItem(getPwaSessionKey(normalizedProjectId)));
+};
+
+export const upsertProjectPwaSession = (
+  projectId?: string | null,
+  payload?: Partial<ProjectPwaSession> & { email?: string | null }
+) => {
+  if (!hasStorage()) return;
+  const normalizedProjectId = normalizeProjectId(projectId);
+  if (!normalizedProjectId) return;
+  const existing = getProjectPwaSession(normalizedProjectId);
+  const normalizedEmail = normalizeEmailIdentity(payload?.email || existing?.email);
+  if (!normalizedEmail) return;
+  const next: ProjectPwaSession = {
+    email: normalizedEmail,
+    verifiedAt: String(payload?.verifiedAt || existing?.verifiedAt || new Date().toISOString()),
+    installedAt:
+      payload?.installedAt !== undefined
+        ? payload.installedAt
+          ? String(payload.installedAt)
+          : null
+        : existing?.installedAt || null,
+    lastOpenedAt:
+      payload?.lastOpenedAt !== undefined
+        ? payload.lastOpenedAt
+          ? String(payload.lastOpenedAt)
+          : null
+        : existing?.lastOpenedAt || null
+  };
+  localStorage.setItem(getPwaSessionKey(normalizedProjectId), JSON.stringify(next));
+};
+
+export const clearProjectPwaSession = (projectId?: string | null) => {
+  if (!hasStorage()) return;
+  const normalizedProjectId = normalizeProjectId(projectId);
+  if (!normalizedProjectId) return;
+  localStorage.removeItem(getPwaSessionKey(normalizedProjectId));
+};
+
+export const markProjectPwaSessionInstalled = (
+  projectId?: string | null,
+  email?: string | null
+) => {
+  const nowIso = new Date().toISOString();
+  upsertProjectPwaSession(projectId, {
+    email,
+    installedAt: nowIso,
+    lastOpenedAt: nowIso
+  });
+};
+
+export const touchProjectPwaSession = (projectId?: string | null, email?: string | null) => {
+  upsertProjectPwaSession(projectId, {
+    email,
+    lastOpenedAt: new Date().toISOString()
+  });
+};
+
 export const removeProjectAccessSession = (
   projectId?: string | null,
   emailOverride?: string | null
@@ -220,6 +308,10 @@ export const removeProjectAccessSession = (
   delete sessions[targetEmail];
   writeSessions(normalizedProjectId, sessions);
   removeLegacyCompatValues(normalizedProjectId);
+  const pwaSession = getProjectPwaSession(normalizedProjectId);
+  if (pwaSession && normalizeEmailIdentity(pwaSession.email) === targetEmail) {
+    clearProjectPwaSession(normalizedProjectId);
+  }
 
   const next = sortByMostRecent(Object.entries(sessions))[0];
   if (next) {
@@ -236,6 +328,7 @@ export const clearProjectAccessSessions = (projectId?: string | null) => {
   if (!normalizedProjectId) return;
   localStorage.removeItem(getSessionKey(normalizedProjectId));
   localStorage.removeItem(getActiveEmailKey(normalizedProjectId));
+  localStorage.removeItem(getPwaSessionKey(normalizedProjectId));
   removeLegacyCompatValues(normalizedProjectId);
 };
 
@@ -252,6 +345,7 @@ export const clearAllProjectAccessSessions = () => {
       key.startsWith(AUTH_EMAIL_PREFIX) ||
       key.startsWith(PROJECT_SESSION_PREFIX) ||
       key.startsWith(PROJECT_ACTIVE_EMAIL_PREFIX) ||
+      key.startsWith(PROJECT_PWA_SESSION_PREFIX) ||
       key.startsWith(UNLOCKED_KEY_PREFIX)
     ) {
       keysToRemove.push(key);

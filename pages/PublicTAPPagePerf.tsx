@@ -28,11 +28,15 @@ import {
   clearProjectAccessSessions,
   getActiveProjectAccessEmail,
   getProjectAccessToken,
+  getProjectPwaSession,
   listProjectAccessEmails,
+  markProjectPwaSessionInstalled,
   normalizeEmailIdentity,
   normalizeProjectId,
   removeProjectAccessSession,
   setActiveProjectAccessEmail,
+  touchProjectPwaSession,
+  upsertProjectPwaSession,
   upsertProjectAccessSession
 } from '../services/albumAccessSession';
 
@@ -123,6 +127,8 @@ const PublicTAPPage: React.FC = () => {
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
   const [showIosInstall, setShowIosInstall] = useState(false);
   const [isStandalone, setIsStandalone] = useState(false);
+  const [showPostVerifyInstallPrompt, setShowPostVerifyInstallPrompt] = useState(false);
+  const [postVerifyEmail, setPostVerifyEmail] = useState<string | null>(null);
 
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [showModal, setShowModal] = useState(false);
@@ -211,6 +217,18 @@ const PublicTAPPage: React.FC = () => {
     if (!message) return 'Email failed. Please try again.';
     if (/^email failed:/i.test(message)) return message;
     return `Email failed: ${message}`;
+  };
+
+  const rememberPwaSession = (projectId: string, verifiedEmail?: string | null) => {
+    const normalizedProjectId = normalizeProjectId(projectId);
+    const normalizedVerifiedEmail = normalizeEmailIdentity(verifiedEmail || getAuthEmail(normalizedProjectId));
+    if (!normalizedProjectId || !normalizedVerifiedEmail) return;
+    const nowIso = new Date().toISOString();
+    upsertProjectPwaSession(normalizedProjectId, {
+      email: normalizedVerifiedEmail,
+      verifiedAt: nowIso,
+      lastOpenedAt: nowIso
+    });
   };
 
   const triggerHardReload = useCallback(() => {
@@ -399,8 +417,14 @@ const PublicTAPPage: React.FC = () => {
       setInstallPromptEvent(event as BeforeInstallPromptEvent);
     };
     const handleInstalled = () => {
+      const targetProjectId = normalizeProjectId(project?.projectId || routeProjectId);
+      const targetEmail = normalizeEmailIdentity(postVerifyEmail || getAuthEmail(targetProjectId));
+      if (targetProjectId && targetEmail) {
+        markProjectPwaSessionInstalled(targetProjectId, targetEmail);
+      }
       setInstallPromptEvent(null);
       setIsStandalone(true);
+      setShowPostVerifyInstallPrompt(false);
     };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstall);
@@ -414,13 +438,20 @@ const PublicTAPPage: React.FC = () => {
       (navigator as any).standalone === true;
 
     setIsStandalone(Boolean(standalone));
+    if (standalone) {
+      const targetProjectId = normalizeProjectId(project?.projectId || routeProjectId);
+      const targetEmail = normalizeEmailIdentity(postVerifyEmail || getAuthEmail(targetProjectId));
+      if (targetProjectId && targetEmail) {
+        markProjectPwaSessionInstalled(targetProjectId, targetEmail);
+      }
+    }
     setShowIosInstall(isSafari && !standalone);
 
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
       window.removeEventListener('appinstalled', handleInstalled);
     };
-  }, [PWA_ENABLED, isPwaInstallRoute]);
+  }, [PWA_ENABLED, isPwaInstallRoute, project?.projectId, routeProjectId, postVerifyEmail]);
 
   const refreshAlbumData = useCallback(async ({
     initial = false,
@@ -680,7 +711,29 @@ const PublicTAPPage: React.FC = () => {
         return;
       }
 
-      const token = await ensureAppToken(project.projectId);
+      const normalizedProjectId = normalizeProjectId(project.projectId);
+      const activeEmail = normalizeEmailIdentity(getAuthEmail(normalizedProjectId));
+      const localToken = getAuthToken(normalizedProjectId);
+      const pwaSession = getProjectPwaSession(normalizedProjectId);
+      const pwaSessionEmail = normalizeEmailIdentity(pwaSession?.email);
+      const standaloneNow =
+        isStandalone ||
+        (typeof window !== 'undefined' &&
+          ((typeof window.matchMedia === 'function' &&
+            window.matchMedia('(display-mode: standalone)').matches) ||
+            (navigator as any).standalone === true));
+      const hasTrustedStandaloneSession =
+        standaloneNow &&
+        Boolean(localToken) &&
+        Boolean(pwaSessionEmail) &&
+        pwaSessionEmail === activeEmail;
+
+      if (hasTrustedStandaloneSession) {
+        setIsUnlocked(true);
+        touchProjectPwaSession(normalizedProjectId, pwaSessionEmail);
+      }
+
+      const token = localToken || (await ensureAppToken(normalizedProjectId));
       if (!token) {
         if (canceled) return;
         setIsUnlocked(false);
@@ -688,16 +741,24 @@ const PublicTAPPage: React.FC = () => {
       }
 
       try {
-        const status = await Api.getAccessStatus(project.projectId, token);
+        const status = await Api.getAccessStatus(normalizedProjectId, token);
         if (canceled) return;
         setRemaining(status.remaining ?? null);
         if (status.verified) {
           setIsUnlocked(true);
+          if (standaloneNow) {
+            markProjectPwaSessionInstalled(normalizedProjectId, activeEmail || pwaSessionEmail);
+            touchProjectPwaSession(normalizedProjectId, activeEmail || pwaSessionEmail);
+          }
         } else {
           setIsUnlocked(false);
         }
       } catch (err) {
         if (canceled) return;
+        if (hasTrustedStandaloneSession) {
+          setIsUnlocked(true);
+          return;
+        }
         clearAuthPayload(project.projectId, getAuthEmail(project.projectId));
         lastSupabaseAccessTokenRef.current = null;
         setIsUnlocked(false);
@@ -708,7 +769,18 @@ const PublicTAPPage: React.FC = () => {
     return () => {
       canceled = true;
     };
-  }, [project]);
+  }, [project, isStandalone]);
+
+  useEffect(() => {
+    if (!isStandalone || !project) return;
+    const normalizedProjectId = normalizeProjectId(project.projectId);
+    if (!normalizedProjectId) return;
+    const token = getAuthToken(normalizedProjectId);
+    const email = normalizeEmailIdentity(getAuthEmail(normalizedProjectId));
+    if (!token || !email) return;
+    markProjectPwaSessionInstalled(normalizedProjectId, email);
+    touchProjectPwaSession(normalizedProjectId, email);
+  }, [isStandalone, project?.projectId]);
 
   const resolveAsset = useCallback((value: string) => resolveAssetUrl(value, assetUrls), [assetUrls]);
 
@@ -967,6 +1039,8 @@ const PublicTAPPage: React.FC = () => {
     setRemaining(null);
     setIsUnlocked(false);
     setStep('email');
+    setShowPostVerifyInstallPrompt(false);
+    setPostVerifyEmail(null);
   };
 
   const persistAuthPayload = (payload: any) => {
@@ -1084,6 +1158,34 @@ const PublicTAPPage: React.FC = () => {
     resetModal();
   };
 
+  const handlePostVerificationSuccess = async (projectId: string, verifiedEmail: string) => {
+    const normalizedProjectId = normalizeProjectId(projectId);
+    const normalizedVerifiedEmail = normalizeEmailIdentity(verifiedEmail);
+    if (!normalizedProjectId || !normalizedVerifiedEmail) return;
+
+    rememberPwaSession(normalizedProjectId, normalizedVerifiedEmail);
+    if (!PWA_ENABLED || !isPwaInstallRoute) {
+      return;
+    }
+
+    if (isStandalone) {
+      markProjectPwaSessionInstalled(normalizedProjectId, normalizedVerifiedEmail);
+      return;
+    }
+
+    setPostVerifyEmail(normalizedVerifiedEmail);
+    setShowPostVerifyInstallPrompt(true);
+
+    if (!installPromptEvent) return;
+    const outcome = await handleInstallClick({
+      projectId: normalizedProjectId,
+      email: normalizedVerifiedEmail
+    });
+    if (outcome !== 'accepted') {
+      setShowPostVerifyInstallPrompt(true);
+    }
+  };
+
   const handleRequestMagic = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!project) return;
@@ -1162,6 +1264,11 @@ const PublicTAPPage: React.FC = () => {
         StorageService.logEvent(project.projectId, EventType.ACTIVATION_SUCCESS, 'Email Verified');
       }
       closeModal();
+      const resolvedProjectId = normalizeProjectId(response?.projectId || project?.projectId || routeProjectId);
+      const resolvedEmail = normalizeEmailIdentity(response?.email || email);
+      if (resolvedProjectId && resolvedEmail) {
+        await handlePostVerificationSuccess(resolvedProjectId, resolvedEmail);
+      }
     } catch (err: any) {
       setError(err.message || 'Verification failed.');
     } finally {
@@ -1210,6 +1317,7 @@ const PublicTAPPage: React.FC = () => {
       StorageService.logEvent(project.projectId, EventType.ACTIVATION_SUCCESS, 'Email Verified');
     }
     closeModal();
+    await handlePostVerificationSuccess(projectId, normalizedEmail);
   };
 
   const handleVerifyMagic = async (e: React.FormEvent) => {
@@ -1384,16 +1492,28 @@ const PublicTAPPage: React.FC = () => {
     );
   };
 
-  const handleInstallClick = async () => {
-    if (!installPromptEvent) return;
+  const handleInstallClick = async (options?: { projectId?: string | null; email?: string | null }) => {
+    const targetProjectId = normalizeProjectId(options?.projectId || project?.projectId || routeProjectId);
+    const targetEmail = normalizeEmailIdentity(options?.email || postVerifyEmail || getAuthEmail(targetProjectId));
+    if (!installPromptEvent) {
+      if (isStandalone && targetProjectId && targetEmail) {
+        markProjectPwaSessionInstalled(targetProjectId, targetEmail);
+      }
+      return null;
+    }
     try {
       await installPromptEvent.prompt();
       const result = await installPromptEvent.userChoice;
+      if (result?.outcome === 'accepted' && targetProjectId && targetEmail) {
+        markProjectPwaSessionInstalled(targetProjectId, targetEmail);
+        setShowPostVerifyInstallPrompt(false);
+      }
       if (result?.outcome) {
         setInstallPromptEvent(null);
       }
+      return result?.outcome || null;
     } catch {
-      // ignore install prompt errors
+      return null;
     }
   };
 
@@ -1673,6 +1793,44 @@ const PublicTAPPage: React.FC = () => {
       {recoveryToastMessage && (
         <div className="fixed bottom-6 right-6 z-50 rounded-xl border border-green-400/35 bg-slate-900/95 px-4 py-2 text-[11px] font-black uppercase tracking-[0.2em] text-green-300 shadow-xl">
           {recoveryToastMessage}
+        </div>
+      )}
+      {showPostVerifyInstallPrompt && PWA_ENABLED && isPwaInstallRoute && !isStandalone && (
+        <div className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-slate-950/90 backdrop-blur-md p-0 sm:p-6">
+          <div className="w-full sm:max-w-md bg-slate-900 rounded-t-[30px] sm:rounded-[32px] border border-slate-800 p-6 sm:p-8 text-left max-h-[92dvh] overflow-y-auto tap-native-scroll tap-safe-bottom">
+            <h2 className="text-xl font-black text-white">Install Tap-Album</h2>
+            <p className="mt-3 text-[11px] font-bold uppercase tracking-[0.15em] text-slate-400 leading-relaxed">
+              Add this album to your home screen for direct launch. This device will stay signed in for this album.
+            </p>
+            {showIosInstructions && (
+              <p className="mt-3 text-[10px] font-black uppercase tracking-[0.15em] text-slate-500 leading-relaxed">
+                On iPhone/iPad: tap Share, then Add to Home Screen.
+              </p>
+            )}
+            <div className="mt-6 space-y-3">
+              {installPromptEvent && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void handleInstallClick({
+                      projectId: project.projectId,
+                      email: postVerifyEmail
+                    })
+                  }
+                  className="w-full min-h-[52px] px-4 rounded-2xl font-black text-xs uppercase tracking-[0.24em] flex items-center justify-center gap-3 transition-all bg-green-500 text-black shadow-xl shadow-green-500/20 active:scale-95 touch-manipulation"
+                >
+                  Install Now
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowPostVerifyInstallPrompt(false)}
+                className="w-full min-h-[48px] px-4 rounded-xl font-black text-[10px] uppercase tracking-[0.24em] flex items-center justify-center transition-all bg-slate-800/60 text-slate-300 hover:bg-slate-800 touch-manipulation"
+              >
+                Continue to Player
+              </button>
+            </div>
+          </div>
         </div>
       )}
       <div className="w-full max-w-[520px] tap-full-height overflow-hidden flex flex-col md:my-3 md:h-[calc(100dvh-1.5rem)] md:rounded-[2rem] md:border md:border-slate-800/70 md:shadow-2xl">
